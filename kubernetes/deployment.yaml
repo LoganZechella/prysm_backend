@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prysm-recommender
+  labels:
+    app: prysm-recommender
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: prysm-recommender
+  template:
+    metadata:
+      labels:
+        app: prysm-recommender
+    spec:
+      containers:
+      - name: recommender
+        image: prysm-recommender:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: GOOGLE_CLOUD_PROJECT
+          valueFrom:
+            configMapKeyRef:
+              name: prysm-config
+              key: google-cloud-project
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: prysm-secrets
+              key: openai-api-key
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prysm-recommender-service
+spec:
+  selector:
+    app: prysm-recommender
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: LoadBalancer 

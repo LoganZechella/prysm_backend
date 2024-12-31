@@ -1,0 +1,68 @@
+# Project Configuration
+
+# Google Cloud Settings
+gcp:
+  project_id: ""  # To be filled
+  region: "us-central1"
+  zone: "us-central1-a"
+  storage:
+    raw_data_bucket: "prysm-raw-data"
+    processed_data_bucket: "prysm-processed-data"
+  bigquery:
+    dataset_id: "prysm_recommendations"
+
+# API Configurations
+apis:
+  google:
+    scopes:
+      - "https://www.googleapis.com/auth/calendar.readonly"
+      - "https://www.googleapis.com/auth/contacts.readonly"
+      - "https://www.googleapis.com/auth/gmail.readonly"
+      - "https://www.googleapis.com/auth/drive.readonly"
+  spotify:
+    scopes:
+      - "user-read-private"
+      - "user-read-email"
+      - "user-top-read"
+      - "user-read-recently-played"
+  linkedin:
+    scopes:
+      - "r_liteprofile"
+      - "r_emailaddress"
+      - "r_network"
+
+# Apache NiFi Configuration
+nifi:
+  host: "localhost"
+  port: 8443
+  ssl_enabled: true
+
+# Apache Airflow Configuration
+airflow:
+  dag_folder: "airflow/dags"
+  schedule_interval: "0 */6 * * *"  # Every 6 hours
+
+# AI Services
+ai_services:
+  openai:
+    model: "gpt-4"
+    max_tokens: 2000
+  google_nlp:
+    language: "en"
+
+# Monitoring
+monitoring:
+  prometheus:
+    port: 9090
+  grafana:
+    port: 3000
+  elasticsearch:
+    host: "localhost"
+    port: 9200
+
+# Recommendation Engine Settings
+recommender:
+  update_interval_hours: 24
+  confidence_threshold: 0.8
+  max_recommendations: 10
+  cache_ttl_minutes: 60 
