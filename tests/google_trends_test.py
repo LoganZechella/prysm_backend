@@ -1,86 +1,101 @@
-import os
+import pytest
+from unittest.mock import Mock, patch
+import pandas as pd
 from utils.google_trends_utils import (
     get_google_trends_client,
     fetch_trending_topics,
     fetch_topic_interest,
-    fetch_related_queries,
+    fetch_related_topics,
     upload_to_gcs
 )
 
-def test_google_trends_ingestion():
-    print("Starting Google Trends ingestion test...")
-    
-    # Test Google Trends client creation
-    try:
-        pytrends = get_google_trends_client()
-        print("✓ Successfully created Google Trends client")
-    except Exception as e:
-        print(f"✗ Failed to create Google Trends client: {str(e)}")
-        return
-    
-    # Test fetching trending topics
-    try:
-        trending_topics = fetch_trending_topics(pytrends)
-        print(f"✓ Successfully fetched {len(trending_topics)} trending topics")
-    except Exception as e:
-        print(f"✗ Failed to fetch trending topics: {str(e)}")
-        return
-    
-    # Extract topic queries for interest and related queries
-    topics = [topic['query'] for topic in trending_topics[:5]]  # Use top 5 topics
-    
-    # Test fetching interest over time
-    try:
-        interest_data = fetch_topic_interest(pytrends, topics)
-        print(f"✓ Successfully fetched interest data for {len(topics)} topics")
-    except Exception as e:
-        print(f"✗ Failed to fetch interest data: {str(e)}")
-        return
-    
-    # Test fetching related queries
-    try:
-        related_data = fetch_related_queries(pytrends, topics)
-        print(f"✓ Successfully fetched related queries for {len(topics)} topics")
-    except Exception as e:
-        print(f"✗ Failed to fetch related queries: {str(e)}")
-        return
-    
-    # Test GCS upload
-    try:
-        bucket_name = os.getenv('GCS_RAW_BUCKET')
-        
-        # Upload trending topics
-        topics_blob = upload_to_gcs(
-            trending_topics,
-            bucket_name,
-            'google_trends/raw/trending_topics.json'
-        )
-        print(f"✓ Successfully uploaded trending topics to {topics_blob}")
-        
-        # Upload interest data
-        interest_blob = upload_to_gcs(
-            interest_data,
-            bucket_name,
-            'google_trends/raw/topic_interest.json'
-        )
-        print(f"✓ Successfully uploaded interest data to {interest_blob}")
-        
-        # Upload related queries
-        related_blob = upload_to_gcs(
-            related_data,
-            bucket_name,
-            'google_trends/raw/related_queries.json'
-        )
-        print(f"✓ Successfully uploaded related queries to {related_blob}")
-        
-    except Exception as e:
-        print(f"✗ Failed to upload to GCS: {str(e)}")
-        return
-    
-    print("\nTest completed successfully! 🎉")
-    print(f"Topics file: {topics_blob}")
-    print(f"Interest file: {interest_blob}")
-    print(f"Related queries file: {related_blob}")
+@pytest.fixture
+def mock_trends_client():
+    return Mock()
 
-if __name__ == "__main__":
-    test_google_trends_ingestion() 
+@pytest.fixture
+def mock_storage_client():
+    with patch('google.cloud.storage.Client') as mock_client:
+        yield mock_client
+
+def test_get_google_trends_client():
+    with patch('utils.google_trends_utils.TrendReq') as mock_trends:
+        client = get_google_trends_client()
+        assert mock_trends.called
+        assert mock_trends.call_args[1]['hl'] == 'en-US'
+        assert mock_trends.call_args[1]['tz'] == 360
+
+def test_fetch_trending_topics(mock_trends_client):
+    # Mock trending searches response
+    mock_trends_client.trending_searches.return_value = ['topic1', 'topic2', 'topic3']
+    
+    # Mock interest over time response
+    mock_interest_data = pd.DataFrame({
+        'topic1': [10, 20, 30],
+        'topic2': [15, 25, 35],
+        'topic3': [5, 15, 25]
+    })
+    mock_trends_client.interest_over_time.return_value = mock_interest_data
+    
+    topics = fetch_trending_topics(mock_trends_client)
+    
+    assert len(topics) > 0
+    assert all(isinstance(topic, dict) for topic in topics)
+    assert all('topic' in topic for topic in topics)
+    assert all('interest_over_time' in topic for topic in topics)
+    assert all('timestamp' in topic for topic in topics)
+
+def test_fetch_topic_interest(mock_trends_client):
+    # Mock interest over time response
+    mock_interest_data = pd.DataFrame({
+        'topic1': [10, 20, 30],
+        'topic2': [15, 25, 35]
+    })
+    mock_trends_client.interest_over_time.return_value = mock_interest_data
+    
+    topics = ['topic1', 'topic2']
+    interest_data = fetch_topic_interest(mock_trends_client, topics)
+    
+    assert isinstance(interest_data, dict)
+    assert all(topic in interest_data for topic in topics)
+    assert mock_trends_client.build_payload.called
+    assert mock_trends_client.interest_over_time.called
+
+def test_fetch_related_topics(mock_trends_client):
+    # Mock related topics response
+    mock_related_data = {
+        'topic1': {
+            'rising': pd.DataFrame({
+                'topic': ['related1', 'related2'],
+                'value': [100, 50]
+            })
+        }
+    }
+    mock_trends_client.related_topics.return_value = mock_related_data
+    
+    topics = ['topic1']
+    related_data = fetch_related_topics(mock_trends_client, topics)
+    
+    assert isinstance(related_data, dict)
+    assert 'topic1' in related_data
+    assert isinstance(related_data['topic1'], list)
+    assert mock_trends_client.build_payload.called
+    assert mock_trends_client.related_topics.called
+
+def test_upload_to_gcs(mock_storage_client):
+    test_data = {'test': 'data'}
+    bucket_name = 'test-bucket'
+    blob_path = 'test/path.json'
+    
+    # Mock the bucket and blob
+    mock_bucket = Mock()
+    mock_blob = Mock()
+    mock_storage_client.return_value.bucket.return_value = mock_bucket
+    mock_bucket.blob.return_value = mock_blob
+    
+    result = upload_to_gcs(test_data, bucket_name, blob_path)
+    
+    assert result == f'gs://{bucket_name}/{blob_path}'
+    assert mock_storage_client.called
+    assert mock_bucket.blob.called
+    assert mock_blob.upload_from_string.called 
