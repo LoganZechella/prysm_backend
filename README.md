@@ -1,82 +1,95 @@
-# AI-Powered Recommendation Engine
+# Prysm Backend
 
-A robust, AI-powered recommendation engine that generates personalized recommendations by processing user data from multiple sources including Google, Spotify, and LinkedIn.
+A data ingestion and processing pipeline for collecting and analyzing music industry trends using Spotify, Google Trends, and LinkedIn data.
 
-## Architecture Overview
+## Setup
 
-### Data Sources
-- Google (People, Calendar, Contacts, Drive, Gmail APIs)
-- Spotify (Web API)
-- LinkedIn (Profile, Connections, Email APIs)
-
-### Infrastructure Components
-- **Data Storage**: Google Cloud Storage, BigQuery, Firestore
-- **Processing Tools**: Apache NiFi, Apache Airflow, TensorFlow Extended (TFX)
-- **AI Services**: OpenAI GPT-4, Google Cloud Natural Language API
-- **Orchestration**: Kubernetes, Istio, Airflow, Kubeflow Pipelines
-- **Monitoring & Logging**: Prometheus, Grafana, ELK Stack
-
-## Project Setup
-
-### Prerequisites
-- Python 3.8+
-- Docker
-- Google Cloud SDK
-- kubectl
-- Helm
-
-### Environment Setup
-1. Clone the repository
-```bash
-git clone [repository-url]
-cd prysm_backend
-```
-
-2. Create and activate virtual environment
+1. Create and activate a virtual environment:
 ```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: .\venv\Scripts\activate
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-3. Install dependencies
+2. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-4. Configure Google Cloud credentials
-```bash
-gcloud auth application-default login
+3. Set up environment variables:
+Create a `.env` file in the root directory with the following variables:
 ```
+# Spotify API
+SPOTIFY_CLIENT_ID=your_spotify_client_id
+SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
+
+# Google Cloud
+GOOGLE_APPLICATION_CREDENTIALS=path/to/your/credentials.json
+
+# LinkedIn API
+LINKEDIN_CLIENT_ID=your_linkedin_client_id
+LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
+
+# Airflow
+AIRFLOW_HOME=./airflow
+```
+
+4. Initialize Airflow database:
+```bash
+airflow db init
+```
+
+5. Create Airflow admin user:
+```bash
+airflow users create \
+    --username admin \
+    --firstname Admin \
+    --lastname User \
+    --role Admin \
+    --email admin@example.com
+```
+
+## Running the Pipeline
+
+1. Start the Airflow webserver:
+```bash
+airflow webserver -p 8080
+```
+
+2. In a new terminal, start the Airflow scheduler:
+```bash
+airflow scheduler
+```
+
+3. Access the Airflow web interface at http://localhost:8080
 
 ## Project Structure
+
 ```
 prysm_backend/
-├── airflow/                 # Airflow DAGs and configurations
-├── config/                  # Configuration files
-├── data_ingestion/         # Data ingestion components
-│   ├── google/             # Google APIs integration
-│   ├── spotify/            # Spotify API integration
-│   └── linkedin/           # LinkedIn API integration
-├── kubernetes/             # Kubernetes manifests
-├── models/                 # ML models and training scripts
-├── nifi/                   # NiFi templates and configurations
-├── profiler/              # User profiling components
-├── recommender/           # Recommendation engine core
-└── tests/                 # Test suites
+├── airflow/
+│   ├── dags/           # Airflow DAG definitions
+│   ├── plugins/        # Custom Airflow plugins
+│   └── logs/          # Airflow logs
+├── tests/             # Test files
+├── utils/             # Utility functions
+├── requirements.txt   # Project dependencies
+└── README.md         # Project documentation
 ```
 
-## Development
+## Testing
 
-### Local Development
-1. Start local Kubernetes cluster
-2. Deploy necessary components
-3. Run data ingestion pipelines
-
-### Deployment
-The project uses GitHub Actions for CI/CD. See `.github/workflows` for pipeline configurations.
+Run tests using pytest:
+```bash
+pytest tests/
+```
 
 ## Contributing
-Please read CONTRIBUTING.md for details on our code of conduct and the process for submitting pull requests.
+
+1. Create a new branch for your feature
+2. Make your changes
+3. Run tests
+4. Submit a pull request
 
 ## License
-This project is licensed under the terms of the LICENSE file included in the repository.
+
+This project is licensed under the MIT License - see the LICENSE file for details.

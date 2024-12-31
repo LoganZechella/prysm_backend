@@ -1,120 +1,65 @@
-from pytrends.request import TrendReq
 import json
-from google.cloud import storage
 from datetime import datetime, timedelta
-import os
-from typing import List, Dict, Any
+from pytrends.request import TrendReq
+from google.cloud import storage
 
-def get_google_trends_client() -> TrendReq:
-    """
-    Initialize and return a Google Trends client.
-    """
+def get_google_trends_client():
+    """Initialize and return a Google Trends client."""
     return TrendReq(hl='en-US', tz=360)
 
-def fetch_trending_topics(pytrends: TrendReq, geo: str = 'US') -> List[Dict[str, Any]]:
-    """
-    Fetch daily trending topics from Google Trends.
+def fetch_trending_topics(client, category=1113):  # 1113 is the category ID for music
+    """Fetch trending topics from Google Trends in the music category."""
+    # Get real-time trending searches
+    trending = client.trending_searches(pn='united_states')
     
-    Args:
-        pytrends: Initialized pytrends client
-        geo: Geographic location (default: 'US')
+    # Get more details about each trending topic
+    topics_data = []
+    for topic in trending[:10]:  # Limit to top 10 trending topics
+        client.build_payload([topic], timeframe='today 3-m', cat=category)
+        interest_data = client.interest_over_time()
         
-    Returns:
-        List of trending topics with metadata
-    """
-    # Get trending searches for the day
-    trending_searches = pytrends.trending_searches(pn=geo)
+        if not interest_data.empty:
+            topic_data = {
+                'topic': topic,
+                'interest_over_time': interest_data[topic].to_dict(),
+                'timestamp': datetime.now().isoformat()
+            }
+            topics_data.append(topic_data)
     
-    # Convert to list of dictionaries with metadata
-    trending_topics = []
-    for topic in trending_searches[0].tolist():
-        trending_topics.append({
-            'topic': topic,
-            'geo': geo,
-            'timestamp': datetime.utcnow().isoformat(),
-            'rank': len(trending_topics) + 1
-        })
-    
-    return trending_topics
+    return topics_data
 
-def fetch_topic_interest(pytrends: TrendReq, topics: List[str], timeframe: str = 'today 3-m') -> Dict[str, Any]:
-    """
-    Fetch interest over time data for given topics.
-    
-    Args:
-        pytrends: Initialized pytrends client
-        topics: List of topics to analyze
-        timeframe: Time range for analysis (default: 'today 3-m')
-        
-    Returns:
-        Dictionary containing interest over time data
-    """
+def fetch_topic_interest(client, topics, timeframe='today 3-m'):
+    """Fetch interest over time data for specific topics."""
     interest_data = {}
     
     # Process topics in batches of 5 (API limitation)
     for i in range(0, len(topics), 5):
         batch = topics[i:i+5]
-        pytrends.build_payload(batch, timeframe=timeframe)
+        client.build_payload(batch, timeframe=timeframe)
+        data = client.interest_over_time()
         
-        # Get interest over time
-        interest_over_time = pytrends.interest_over_time()
-        
-        # Convert to dictionary format
-        if not interest_over_time.empty:
+        if not data.empty:
             for topic in batch:
-                if topic in interest_over_time.columns:
-                    interest_data[topic] = {
-                        'values': interest_over_time[topic].to_dict(),
-                        'timeframe': timeframe,
-                        'timestamp': datetime.utcnow().isoformat()
-                    }
+                interest_data[topic] = data[topic].to_dict()
     
     return interest_data
 
-def fetch_related_topics(pytrends: TrendReq, topics: List[str]) -> Dict[str, Any]:
-    """
-    Fetch related topics for given topics.
-    
-    Args:
-        pytrends: Initialized pytrends client
-        topics: List of topics to analyze
-        
-    Returns:
-        Dictionary containing related topics data
-    """
+def fetch_related_topics(client, topics):
+    """Fetch related topics for the given topics."""
     related_data = {}
     
     for topic in topics:
-        pytrends.build_payload([topic])
+        client.build_payload([topic])
+        related = client.related_topics()
         
-        # Get related topics
-        related_topics = pytrends.related_topics()
-        
-        if topic in related_topics and related_topics[topic]:
-            rising = related_topics[topic].get('rising', None)
-            top = related_topics[topic].get('top', None)
-            
-            related_data[topic] = {
-                'rising': rising.to_dict('records') if rising is not None else [],
-                'top': top.to_dict('records') if top is not None else [],
-                'timestamp': datetime.utcnow().isoformat()
-            }
+        if related and topic in related:
+            # Convert DataFrame to dict and keep only relevant columns
+            related_data[topic] = related[topic]['rising'].to_dict('records')
     
     return related_data
 
-def upload_to_gcs(data: Any, bucket_name: str, blob_path: str) -> str:
-    """
-    Upload data to Google Cloud Storage.
-    
-    Args:
-        data: Data to upload
-        bucket_name: Name of the GCS bucket
-        blob_path: Path within the bucket
-        
-    Returns:
-        GCS URI of the uploaded file
-    """
-    # Initialize GCS client
+def upload_to_gcs(data, bucket_name, blob_path):
+    """Upload data to Google Cloud Storage."""
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_path)

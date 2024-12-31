@@ -1,224 +1,125 @@
 import json
+import pandas as pd
 from google.cloud import storage
 from datetime import datetime
-from typing import Dict, List, Any, Tuple
 
-def read_from_gcs(bucket_name: str, blob_path: str) -> Any:
-    """
-    Read JSON data from Google Cloud Storage.
-    
-    Args:
-        bucket_name: Name of the GCS bucket
-        blob_path: Path to the blob within the bucket
-        
-    Returns:
-        Parsed JSON data
-    """
+def read_from_gcs(bucket_name, blob_path):
+    """Read JSON data from Google Cloud Storage."""
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_path)
     
+    # Download and parse JSON data
     content = blob.download_as_string()
     return json.loads(content)
 
-def process_spotify_data(tracks_data: List[Dict], artists_data: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
-    """
-    Process raw Spotify data into a more analytics-friendly format.
+def process_spotify_data(tracks_data, artists_data):
+    """Process Spotify tracks and artists data."""
+    # Convert to DataFrames
+    tracks_df = pd.DataFrame(tracks_data)
+    artists_df = pd.DataFrame(artists_data)
     
-    Args:
-        tracks_data: Raw tracks data
-        artists_data: Raw artists data
-        
-    Returns:
-        Tuple of processed tracks and artists data
-    """
-    processed_tracks = []
-    processed_artists = []
+    # Extract relevant features from tracks
+    processed_tracks = tracks_df.apply(lambda x: {
+        'id': x.get('id'),
+        'name': x.get('name'),
+        'popularity': x.get('popularity'),
+        'artist_id': x['artists'][0]['id'] if x.get('artists') else None,
+        'artist_name': x['artists'][0]['name'] if x.get('artists') else None,
+        'album': x.get('album', {}).get('name'),
+        'release_date': x.get('album', {}).get('release_date'),
+        'duration_ms': x.get('duration_ms'),
+        'explicit': x.get('explicit', False),
+        'timestamp': datetime.now().isoformat()
+    }, axis=1).tolist()
     
-    # Process tracks
-    for track in tracks_data:
-        processed_track = {
-            'id': track['id'],
-            'name': track['name'],
-            'popularity': track['popularity'],
-            'duration_ms': track['duration_ms'],
-            'explicit': track['explicit'],
-            'artist_ids': [artist['id'] for artist in track['artists']],
-            'artist_names': [artist['name'] for artist in track['artists']],
-            'album_name': track['album']['name'],
-            'album_release_date': track['album']['release_date'],
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        processed_tracks.append(processed_track)
-    
-    # Process artists
-    for artist in artists_data:
-        processed_artist = {
-            'id': artist['id'],
-            'name': artist['name'],
-            'popularity': artist['popularity'],
-            'genres': artist['genres'],
-            'followers': artist['followers']['total'],
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        processed_artists.append(processed_artist)
+    # Extract relevant features from artists
+    processed_artists = artists_df.apply(lambda x: {
+        'id': x.get('id'),
+        'name': x.get('name'),
+        'genres': x.get('genres', []),
+        'popularity': x.get('popularity'),
+        'followers': x.get('followers', {}).get('total'),
+        'timestamp': datetime.now().isoformat()
+    }, axis=1).tolist()
     
     return processed_tracks, processed_artists
 
-def process_trends_data(
-    trending_data: List[Dict],
-    interest_data: Dict[str, Dict],
-    related_data: Dict[str, Dict]
-) -> Tuple[List[Dict], List[Dict], List[Dict]]:
-    """
-    Process raw Google Trends data into a more analytics-friendly format.
-    
-    Args:
-        trending_data: Raw trending topics data
-        interest_data: Raw interest over time data
-        related_data: Raw related topics data
-        
-    Returns:
-        Tuple of processed trending, interest, and related topics data
-    """
-    processed_trending = []
-    processed_interest = []
-    processed_related = []
-    
+def process_trends_data(topics_data, interest_data, related_data):
+    """Process Google Trends data."""
     # Process trending topics
-    for topic in trending_data:
+    processed_topics = []
+    for topic in topics_data:
         processed_topic = {
             'topic': topic['topic'],
-            'rank': topic['rank'],
-            'geo': topic['geo'],
-            'timestamp': topic['timestamp']
+            'interest_over_time': topic.get('interest_over_time', {}),
+            'timestamp': topic.get('timestamp', datetime.now().isoformat())
         }
-        processed_trending.append(processed_topic)
+        processed_topics.append(processed_topic)
     
-    # Process interest over time
-    for topic, data in interest_data.items():
-        for date, value in data['values'].items():
-            interest_point = {
-                'topic': topic,
-                'date': date,
-                'interest_value': value,
-                'timeframe': data['timeframe'],
-                'timestamp': data['timestamp']
-            }
-            processed_interest.append(interest_point)
-    
-    # Process related topics
-    for topic, data in related_data.items():
-        # Process rising topics
-        for rising_topic in data['rising']:
-            related_topic = {
-                'main_topic': topic,
-                'related_topic': rising_topic['topic_title'],
-                'type': 'rising',
-                'value': rising_topic['value'],
-                'timestamp': data['timestamp']
-            }
-            processed_related.append(related_topic)
-        
-        # Process top topics
-        for top_topic in data['top']:
-            related_topic = {
-                'main_topic': topic,
-                'related_topic': top_topic['topic_title'],
-                'type': 'top',
-                'value': top_topic['value'],
-                'timestamp': data['timestamp']
-            }
-            processed_related.append(related_topic)
-    
-    return processed_trending, processed_interest, processed_related
-
-def process_linkedin_data(
-    company_info: Dict,
-    company_updates: List[Dict],
-    job_postings: List[Dict]
-) -> Tuple[Dict, List[Dict], List[Dict]]:
-    """
-    Process raw LinkedIn data into a more analytics-friendly format.
-    
-    Args:
-        company_info: Raw company information
-        company_updates: Raw company updates/posts
-        job_postings: Raw job postings
-        
-    Returns:
-        Tuple of processed company info, updates, and job postings
-    """
-    # Process company info
-    processed_company = {
-        'company_id': company_info['company_id'],
-        'name': company_info['name'],
-        'industry': company_info['industry'],
-        'company_size': company_info['company_size'],
-        'followers': company_info['followers'],
-        'specialties': company_info['specialties'],
-        'headquarters': next(
-            (loc for loc in company_info['locations'] if loc['headquarters']),
-            {'city': '', 'country': ''}
-        ),
-        'timestamp': datetime.utcnow().isoformat()
+    # Process interest data
+    processed_interest = {
+        'data': interest_data,
+        'timestamp': datetime.now().isoformat()
     }
     
-    # Process company updates
-    processed_updates = []
-    for update in company_updates:
-        processed_update = {
-            'update_id': update['update_id'],
-            'company_id': update['company_id'],
-            'content_length': len(update['content']),
-            'engagement_total': sum(update['engagement'].values()),
-            'likes': update['engagement']['likes'],
-            'comments': update['engagement']['comments'],
-            'shares': update['engagement']['shares'],
-            'posted_at': update['posted_at'],
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        processed_updates.append(processed_update)
+    # Process related topics
+    processed_related = {
+        'data': related_data,
+        'timestamp': datetime.now().isoformat()
+    }
     
-    # Process job postings
-    processed_jobs = []
-    for job in job_postings:
-        processed_job = {
-            'job_id': job['job_id'],
-            'company_id': job['company_id'],
-            'title': job['title'],
-            'location': job['location'],
-            'listed_at': job['listed_at'],
-            'engagement_total': job['applies'] + job['views'],
-            'applies': job['applies'],
-            'views': job['views'],
-            'remote_allowed': job['remote_allowed'],
-            'experience_level': job['experience_level'],
-            'employment_type': job['employment_type'],
-            'industries': job['industries'],
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        processed_jobs.append(processed_job)
-    
-    return processed_company, processed_updates, processed_jobs
+    return processed_topics, processed_interest, processed_related
 
-def upload_processed_data(data: Any, bucket_name: str, blob_path: str) -> str:
-    """
-    Upload processed data to Google Cloud Storage.
+def process_linkedin_data(profile_data, connections_data, activity_data):
+    """Process LinkedIn data."""
+    # Process profile data
+    processed_profile = {
+        'id': profile_data.get('id'),
+        'first_name': profile_data.get('firstName', {}).get('localized', {}).get('en_US'),
+        'last_name': profile_data.get('lastName', {}).get('localized', {}).get('en_US'),
+        'headline': profile_data.get('headline', {}).get('localized', {}).get('en_US'),
+        'industry': profile_data.get('industry', {}).get('localized', {}).get('en_US'),
+        'timestamp': datetime.now().isoformat()
+    }
     
-    Args:
-        data: Data to upload
-        bucket_name: Name of the GCS bucket
-        blob_path: Path within the bucket
-        
-    Returns:
-        GCS URI of the uploaded file
-    """
+    # Process connections data
+    processed_connections = []
+    for connection in connections_data.get('elements', []):
+        processed_connection = {
+            'id': connection.get('id'),
+            'first_name': connection.get('firstName', {}).get('localized', {}).get('en_US'),
+            'last_name': connection.get('lastName', {}).get('localized', {}).get('en_US'),
+            'headline': connection.get('headline', {}).get('localized', {}).get('en_US'),
+            'industry': connection.get('industry', {}).get('localized', {}).get('en_US'),
+            'timestamp': datetime.now().isoformat()
+        }
+        processed_connections.append(processed_connection)
+    
+    # Process activity data
+    processed_activities = []
+    for activity in activity_data.get('elements', []):
+        processed_activity = {
+            'id': activity.get('id'),
+            'type': activity.get('type'),
+            'timestamp': activity.get('created', {}).get('time'),
+            'text': activity.get('text', {}).get('text'),
+            'processed_timestamp': datetime.now().isoformat()
+        }
+        processed_activities.append(processed_activity)
+    
+    return processed_profile, processed_connections, processed_activities
+
+def upload_processed_data(data, bucket_name, blob_path):
+    """Upload processed data to Google Cloud Storage."""
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_path)
     
-    json_data = json.dumps(data, indent=2)
+    # Convert data to JSON string
+    json_data = json.dumps(data)
+    
+    # Upload to GCS
     blob.upload_from_string(json_data, content_type='application/json')
     
     return f'gs://{bucket_name}/{blob_path}' 
