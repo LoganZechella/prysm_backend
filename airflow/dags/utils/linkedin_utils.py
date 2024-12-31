@@ -28,27 +28,32 @@ def get_linkedin_client() -> Dict:
         }
     }
 
-def fetch_profile_info(auth: Dict, profile_id: str = 'me') -> Dict:
+def fetch_company_info(auth: Dict, company_id: str) -> Dict:
     """
-    Fetch basic profile information using LinkedIn's REST API.
-    Uses the r_liteprofile scope.
+    Fetch company information using LinkedIn's REST API.
     
     Args:
         auth: LinkedIn OAuth credentials
-        profile_id: LinkedIn profile ID (default: 'me' for authenticated user)
+        company_id: LinkedIn company ID
         
     Returns:
-        Dictionary containing profile information
+        Dictionary containing company information
     """
-    # LinkedIn v2 API endpoint for lite profile
-    url = 'https://api.linkedin.com/v2/me'
+    url = f'https://api.linkedin.com/v2/organizations/{company_id}'
     
-    # Fields available with r_liteprofile scope
     fields = [
         'id',
-        'localizedFirstName',
-        'localizedLastName',
-        'profilePicture(displayImage~:playableStreams)'
+        'name',
+        'description',
+        'industries',
+        'specialties',
+        'locations',
+        'staffCount',
+        'foundedOn',
+        'website',
+        'groups',
+        'status',
+        'vanityName'
     ]
     
     params = {
@@ -57,126 +62,116 @@ def fetch_profile_info(auth: Dict, profile_id: str = 'me') -> Dict:
     
     response = requests.get(url, headers=auth['headers'], params=params)
     response.raise_for_status()
-    profile = response.json()
+    company = response.json()
     
-    # Get email address (requires r_emailaddress scope)
-    email_url = 'https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~))'
-    try:
-        email_response = requests.get(email_url, headers=auth['headers'])
-        email_response.raise_for_status()
-        email_data = email_response.json()
-        email = email_data.get('elements', [{}])[0].get('handle~', {}).get('emailAddress', '')
-    except:
-        email = ''
-    
-    # Process the response into our standard format
     processed_info = {
-        'profile_id': profile.get('id', ''),
-        'first_name': profile.get('localizedFirstName', ''),
-        'last_name': profile.get('localizedLastName', ''),
-        'email': email,
-        'profile_picture_url': (
-            profile.get('profilePicture', {})
-            .get('displayImage~', {})
-            .get('elements', [{}])[0]
-            .get('identifiers', [{}])[0]
-            .get('identifier', '')
-        ),
+        'company_id': company.get('id', ''),
+        'name': company.get('name', ''),
+        'description': company.get('description', ''),
+        'industries': company.get('industries', []),
+        'specialties': company.get('specialties', []),
+        'locations': company.get('locations', []),
+        'staff_count': company.get('staffCount', 0),
+        'founded_on': company.get('foundedOn', ''),
+        'website': company.get('website', ''),
+        'status': company.get('status', ''),
+        'vanity_name': company.get('vanityName', ''),
         'timestamp': datetime.utcnow().isoformat()
     }
     
     return processed_info
 
-def fetch_connections(auth: Dict) -> List[Dict]:
+def fetch_company_updates(auth: Dict, company_id: str, limit: int = 50) -> List[Dict]:
     """
-    Fetch user's first-degree connections using LinkedIn's REST API.
-    Uses the r_network scope.
+    Fetch company updates/posts using LinkedIn's REST API.
     
     Args:
         auth: LinkedIn OAuth credentials
+        company_id: LinkedIn company ID
+        limit: Maximum number of updates to fetch
         
     Returns:
-        List of connections with basic information
+        List of company updates
     """
-    url = 'https://api.linkedin.com/v2/connections'
-    params = {
-        'q': 'viewer',
-        'start': 0,
-        'count': 50,  # LinkedIn API limit
-        'projection': '(elements*(miniProfile))'
-    }
+    url = f'https://api.linkedin.com/v2/shares'
     
-    try:
-        response = requests.get(url, headers=auth['headers'], params=params)
-        response.raise_for_status()
-        data = response.json()
-        
-        processed_connections = []
-        for connection in data.get('elements', []):
-            mini_profile = connection.get('miniProfile', {})
-            conn_data = {
-                'profile_id': mini_profile.get('id', ''),
-                'first_name': mini_profile.get('firstName', {}).get('localized', {}).get('en_US', ''),
-                'last_name': mini_profile.get('lastName', {}).get('localized', {}).get('en_US', ''),
-                'occupation': mini_profile.get('occupation', {}).get('localized', {}).get('en_US', ''),
-                'public_identifier': mini_profile.get('publicIdentifier', ''),
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            processed_connections.append(conn_data)
-        
-        return processed_connections
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 403:
-            # Return empty list if we don't have permission
-            return []
-        raise
-
-def fetch_recent_activity(auth: Dict) -> List[Dict]:
-    """
-    Fetch user's recent activity using LinkedIn's REST API.
-    Uses the r_basicprofile scope.
-    
-    Args:
-        auth: LinkedIn OAuth credentials
-        
-    Returns:
-        List of recent activities
-    """
-    url = 'https://api.linkedin.com/v2/shares'
     params = {
         'q': 'owners',
-        'owners': f'urn:li:person:{auth.get("profile_id", "me")}',
-        'count': 50
+        'owners': f'urn:li:organization:{company_id}',
+        'count': limit
     }
     
-    try:
-        response = requests.get(url, headers=auth['headers'], params=params)
-        response.raise_for_status()
-        data = response.json()
+    response = requests.get(url, headers=auth['headers'], params=params)
+    response.raise_for_status()
+    data = response.json()
+    
+    processed_updates = []
+    for update in data.get('elements', []):
+        update_data = {
+            'update_id': update.get('id', ''),
+            'company_id': company_id,
+            'content': (
+                update.get('specificContent', {})
+                .get('com.linkedin.ugc.ShareContent', {})
+                .get('shareCommentary', {})
+                .get('text', '')
+            ),
+            'engagement': {
+                'likes': update.get('social', {}).get('totalLikes', 0),
+                'comments': update.get('social', {}).get('totalComments', 0),
+                'shares': update.get('social', {}).get('totalShares', 0)
+            },
+            'posted_at': update.get('created', {}).get('time', ''),
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        processed_updates.append(update_data)
+    
+    return processed_updates
+
+def fetch_job_postings(auth: Dict, company_id: str, limit: int = 50) -> List[Dict]:
+    """
+    Fetch job postings using LinkedIn's REST API.
+    
+    Args:
+        auth: LinkedIn OAuth credentials
+        company_id: LinkedIn company ID
+        limit: Maximum number of jobs to fetch
         
-        processed_activities = []
-        for activity in data.get('elements', []):
-            activity_data = {
-                'activity_id': activity.get('id', ''),
-                'activity_type': activity.get('activity', ''),
-                'message': (
-                    activity.get('specificContent', {})
-                    .get('com.linkedin.ugc.ShareContent', {})
-                    .get('message', {})
-                    .get('text', '')
-                ),
-                'created_time': activity.get('created', {}).get('time', ''),
-                'last_modified_time': activity.get('lastModified', {}).get('time', ''),
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            processed_activities.append(activity_data)
-        
-        return processed_activities
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 403:
-            # Return empty list if we don't have permission
-            return []
-        raise
+    Returns:
+        List of job postings
+    """
+    url = f'https://api.linkedin.com/v2/jobs'
+    
+    params = {
+        'q': 'companyId',
+        'companyId': company_id,
+        'count': limit
+    }
+    
+    response = requests.get(url, headers=auth['headers'], params=params)
+    response.raise_for_status()
+    data = response.json()
+    
+    processed_jobs = []
+    for job in data.get('elements', []):
+        job_data = {
+            'job_id': job.get('id', ''),
+            'company_id': company_id,
+            'title': job.get('title', ''),
+            'description': job.get('description', ''),
+            'location': job.get('locationDescription', ''),
+            'remote_allowed': job.get('workRemoteAllowed', False),
+            'experience_level': job.get('experienceLevel', ''),
+            'employment_type': job.get('employmentType', ''),
+            'industries': job.get('industries', []),
+            'applies': job.get('applies', 0),
+            'views': job.get('views', 0),
+            'listed_at': job.get('listedAt', ''),
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        processed_jobs.append(job_data)
+    
+    return processed_jobs
 
 def upload_to_gcs(data: Any, bucket_name: str, blob_path: str) -> str:
     """
@@ -194,7 +189,9 @@ def upload_to_gcs(data: Any, bucket_name: str, blob_path: str) -> str:
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_path)
     
-    json_data = json.dumps(data, indent=2)
-    blob.upload_from_string(json_data, content_type='application/json')
+    blob.upload_from_string(
+        json.dumps(data, indent=2),
+        content_type='application/json'
+    )
     
     return f'gs://{bucket_name}/{blob_path}' 

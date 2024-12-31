@@ -3,9 +3,9 @@ import pytest
 from unittest.mock import patch, MagicMock
 from utils.linkedin_utils import (
     get_linkedin_client,
-    fetch_profile_info,
-    fetch_connections,
-    fetch_recent_activity,
+    fetch_company_info,
+    fetch_company_updates,
+    fetch_job_postings,
     upload_to_gcs
 )
 
@@ -25,106 +25,111 @@ def test_get_linkedin_client():
     assert client['headers']['Content-Type'] == 'application/json'
 
 @patch('requests.get')
-def test_fetch_profile_info(mock_get):
-    """Test fetching profile information"""
-    # Mock response for profile info
-    mock_profile_response = MagicMock()
-    mock_profile_response.json.return_value = {
-        'id': '123456',
-        'localizedFirstName': 'John',
-        'localizedLastName': 'Doe',
-        'profilePicture': {
-            'displayImage~': {
-                'elements': [{
-                    'identifiers': [{
-                        'identifier': 'http://example.com/profile.jpg'
-                    }]
-                }]
-            }
-        }
-    }
-    
-    # Mock response for email
-    mock_email_response = MagicMock()
-    mock_email_response.json.return_value = {
-        'elements': [{
-            'handle~': {
-                'emailAddress': 'john.doe@example.com'
-            }
-        }]
-    }
-    
-    mock_get.side_effect = [mock_profile_response, mock_email_response]
-    
-    auth = get_linkedin_client()
-    profile = fetch_profile_info(auth)
-    
-    assert profile['profile_id'] == '123456'
-    assert profile['first_name'] == 'John'
-    assert profile['last_name'] == 'Doe'
-    assert profile['email'] == 'john.doe@example.com'
-    assert profile['profile_picture_url'] == 'http://example.com/profile.jpg'
-    assert 'timestamp' in profile
-
-@patch('requests.get')
-def test_fetch_connections(mock_get):
-    """Test fetching connections"""
+def test_fetch_company_info(mock_get):
+    """Test fetching company information"""
     mock_response = MagicMock()
     mock_response.json.return_value = {
-        'elements': [{
-            'miniProfile': {
-                'id': '789012',
-                'firstName': {'localized': {'en_US': 'Jane'}},
-                'lastName': {'localized': {'en_US': 'Smith'}},
-                'occupation': {'localized': {'en_US': 'Software Engineer'}},
-                'publicIdentifier': 'jane-smith'
-            }
-        }]
+        'id': '12345',
+        'name': 'Test Company',
+        'description': 'A test company',
+        'industries': ['Technology', 'Software'],
+        'specialties': ['AI', 'Machine Learning'],
+        'locations': [{'city': 'San Francisco', 'country': 'US'}],
+        'staffCount': 500,
+        'foundedOn': '2020-01-01',
+        'website': 'https://testcompany.com',
+        'status': 'ACTIVE',
+        'vanityName': 'testcompany'
     }
     mock_get.return_value = mock_response
     
     auth = get_linkedin_client()
-    connections = fetch_connections(auth)
+    company = fetch_company_info(auth, '12345')
     
-    assert len(connections) == 1
-    assert connections[0]['profile_id'] == '789012'
-    assert connections[0]['first_name'] == 'Jane'
-    assert connections[0]['last_name'] == 'Smith'
-    assert connections[0]['occupation'] == 'Software Engineer'
-    assert connections[0]['public_identifier'] == 'jane-smith'
-    assert 'timestamp' in connections[0]
+    assert company['company_id'] == '12345'
+    assert company['name'] == 'Test Company'
+    assert company['description'] == 'A test company'
+    assert 'Technology' in company['industries']
+    assert 'AI' in company['specialties']
+    assert company['staff_count'] == 500
+    assert company['website'] == 'https://testcompany.com'
+    assert 'timestamp' in company
 
 @patch('requests.get')
-def test_fetch_recent_activity(mock_get):
-    """Test fetching recent activity"""
+def test_fetch_company_updates(mock_get):
+    """Test fetching company updates"""
     mock_response = MagicMock()
     mock_response.json.return_value = {
         'elements': [{
-            'id': 'activity123',
-            'activity': 'SHARE',
+            'id': 'update123',
             'specificContent': {
                 'com.linkedin.ugc.ShareContent': {
-                    'message': {
-                        'text': 'Test post content'
+                    'shareCommentary': {
+                        'text': 'Test update content'
                     }
                 }
             },
-            'created': {'time': '2024-01-01T12:00:00Z'},
-            'lastModified': {'time': '2024-01-01T12:00:00Z'}
+            'social': {
+                'totalLikes': 100,
+                'totalComments': 50,
+                'totalShares': 25
+            },
+            'created': {'time': '2024-01-01T12:00:00Z'}
         }]
     }
     mock_get.return_value = mock_response
     
     auth = get_linkedin_client()
-    activities = fetch_recent_activity(auth)
+    updates = fetch_company_updates(auth, '12345')
     
-    assert len(activities) == 1
-    assert activities[0]['activity_id'] == 'activity123'
-    assert activities[0]['activity_type'] == 'SHARE'
-    assert activities[0]['message'] == 'Test post content'
-    assert activities[0]['created_time'] == '2024-01-01T12:00:00Z'
-    assert activities[0]['last_modified_time'] == '2024-01-01T12:00:00Z'
-    assert 'timestamp' in activities[0]
+    assert len(updates) == 1
+    assert updates[0]['update_id'] == 'update123'
+    assert updates[0]['company_id'] == '12345'
+    assert updates[0]['content'] == 'Test update content'
+    assert updates[0]['engagement']['likes'] == 100
+    assert updates[0]['engagement']['comments'] == 50
+    assert updates[0]['engagement']['shares'] == 25
+    assert updates[0]['posted_at'] == '2024-01-01T12:00:00Z'
+    assert 'timestamp' in updates[0]
+
+@patch('requests.get')
+def test_fetch_job_postings(mock_get):
+    """Test fetching job postings"""
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        'elements': [{
+            'id': 'job123',
+            'title': 'Software Engineer',
+            'description': 'Test job description',
+            'locationDescription': 'San Francisco, CA',
+            'workRemoteAllowed': True,
+            'experienceLevel': 'Senior',
+            'employmentType': 'Full-time',
+            'industries': ['Software'],
+            'applies': 50,
+            'views': 1000,
+            'listedAt': '2024-01-01T12:00:00Z'
+        }]
+    }
+    mock_get.return_value = mock_response
+    
+    auth = get_linkedin_client()
+    jobs = fetch_job_postings(auth, '12345')
+    
+    assert len(jobs) == 1
+    assert jobs[0]['job_id'] == 'job123'
+    assert jobs[0]['company_id'] == '12345'
+    assert jobs[0]['title'] == 'Software Engineer'
+    assert jobs[0]['description'] == 'Test job description'
+    assert jobs[0]['location'] == 'San Francisco, CA'
+    assert jobs[0]['remote_allowed'] is True
+    assert jobs[0]['experience_level'] == 'Senior'
+    assert jobs[0]['employment_type'] == 'Full-time'
+    assert 'Software' in jobs[0]['industries']
+    assert jobs[0]['applies'] == 50
+    assert jobs[0]['views'] == 1000
+    assert jobs[0]['listed_at'] == '2024-01-01T12:00:00Z'
+    assert 'timestamp' in jobs[0]
 
 @patch('google.cloud.storage.Client')
 def test_upload_to_gcs(mock_storage_client):

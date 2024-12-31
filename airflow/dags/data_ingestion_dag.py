@@ -24,8 +24,10 @@ from utils.data_processing_utils import (
     process_linkedin_data,
     upload_processed_data
 )
+from utils.user_profile_utils import aggregate_user_data, store_aggregated_data
 import os
 from dotenv import load_dotenv
+from google.cloud import storage
 
 # Load environment variables
 load_dotenv()
@@ -38,6 +40,13 @@ default_args = {
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
+
+def get_required_env_var(var_name: str) -> str:
+    """Get a required environment variable or raise an error."""
+    value = os.getenv(var_name)
+    if not value:
+        raise ValueError(f"Required environment variable {var_name} is not set")
+    return value
 
 def fetch_spotify_data(**context):
     """
@@ -58,9 +67,11 @@ def fetch_spotify_data(**context):
     # Fetch artist data
     artists = fetch_artist_data(sp_client, list(artist_ids))
     
+    # Get bucket name
+    bucket_name = get_required_env_var('GCS_RAW_BUCKET')
+    
     # Generate filenames with timestamp
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-    bucket_name = os.getenv('GCS_RAW_BUCKET')
     
     # Upload to GCS
     tracks_path = f'spotify/raw/tracks/tracks_{timestamp}.json'
@@ -92,9 +103,11 @@ def fetch_trends_data(**context):
     # Fetch related topics
     related_data = fetch_related_topics(trends_client, topics)
     
+    # Get bucket name
+    bucket_name = get_required_env_var('GCS_RAW_BUCKET')
+    
     # Generate filenames with timestamp
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-    bucket_name = os.getenv('GCS_RAW_BUCKET')
     
     # Upload to GCS
     trending_path = f'trends/raw/trending/trending_{timestamp}.json'
@@ -118,25 +131,35 @@ def fetch_linkedin_data(**context):
     li_client = get_linkedin_client()
     
     # Get target companies from environment variables
-    companies = os.getenv('LINKEDIN_TARGET_COMPANIES', '').split(',')
+    companies_str = get_required_env_var('LINKEDIN_TARGET_COMPANIES')
+    companies = [c.strip() for c in companies_str.split(',') if c.strip()]
+    
+    if not companies:
+        raise ValueError("No target companies specified in LINKEDIN_TARGET_COMPANIES")
+    
+    # Get bucket name
+    bucket_name = get_required_env_var('GCS_RAW_BUCKET')
     
     all_company_info = []
     all_company_updates = []
     all_job_postings = []
     
     for company_id in companies:
-        # Fetch company data
-        company_info = fetch_company_info(li_client, company_id)
-        company_updates = fetch_company_updates(li_client, company_id)
-        job_postings = fetch_job_postings(li_client, company_id)
-        
-        all_company_info.append(company_info)
-        all_company_updates.extend(company_updates)
-        all_job_postings.extend(job_postings)
+        try:
+            # Fetch company data
+            company_info = fetch_company_info(li_client, company_id)
+            company_updates = fetch_company_updates(li_client, company_id)
+            job_postings = fetch_job_postings(li_client, company_id)
+            
+            all_company_info.append(company_info)
+            all_company_updates.extend(company_updates)
+            all_job_postings.extend(job_postings)
+        except Exception as e:
+            print(f"Error fetching data for company {company_id}: {str(e)}")
+            continue
     
     # Generate filenames with timestamp
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-    bucket_name = os.getenv('GCS_RAW_BUCKET')
     
     # Upload to GCS
     companies_path = f'linkedin/raw/companies/companies_{timestamp}.json'
@@ -161,8 +184,11 @@ def process_spotify_raw_data(**context):
     tracks_uri = ti.xcom_pull(task_ids='fetch_spotify_data', key='tracks_file')
     artists_uri = ti.xcom_pull(task_ids='fetch_spotify_data', key='artists_file')
     
-    # Extract bucket and blob paths
-    raw_bucket = os.getenv('GCS_RAW_BUCKET')
+    # Get bucket names
+    raw_bucket = get_required_env_var('GCS_RAW_BUCKET')
+    processed_bucket = get_required_env_var('GCS_PROCESSED_BUCKET')
+    
+    # Extract blob paths
     tracks_path = tracks_uri.replace(f'gs://{raw_bucket}/', '')
     artists_path = artists_uri.replace(f'gs://{raw_bucket}/', '')
     
@@ -175,7 +201,6 @@ def process_spotify_raw_data(**context):
     
     # Generate filenames with timestamp
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-    processed_bucket = os.getenv('GCS_PROCESSED_BUCKET')
     
     # Upload processed data
     proc_tracks_path = f'spotify/processed/tracks/tracks_{timestamp}.json'
@@ -198,8 +223,11 @@ def process_trends_raw_data(**context):
     interest_uri = ti.xcom_pull(task_ids='fetch_trends_data', key='interest_file')
     related_uri = ti.xcom_pull(task_ids='fetch_trends_data', key='related_file')
     
-    # Extract bucket and blob paths
-    raw_bucket = os.getenv('GCS_RAW_BUCKET')
+    # Get bucket names
+    raw_bucket = get_required_env_var('GCS_RAW_BUCKET')
+    processed_bucket = get_required_env_var('GCS_PROCESSED_BUCKET')
+    
+    # Extract blob paths
     trending_path = trending_uri.replace(f'gs://{raw_bucket}/', '')
     interest_path = interest_uri.replace(f'gs://{raw_bucket}/', '')
     related_path = related_uri.replace(f'gs://{raw_bucket}/', '')
@@ -216,7 +244,6 @@ def process_trends_raw_data(**context):
     
     # Generate filenames with timestamp
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-    processed_bucket = os.getenv('GCS_PROCESSED_BUCKET')
     
     # Upload processed data
     proc_trending_path = f'trends/processed/trending/trending_{timestamp}.json'
@@ -242,8 +269,11 @@ def process_linkedin_raw_data(**context):
     updates_uri = ti.xcom_pull(task_ids='fetch_linkedin_data', key='updates_file')
     jobs_uri = ti.xcom_pull(task_ids='fetch_linkedin_data', key='jobs_file')
     
-    # Extract bucket and blob paths
-    raw_bucket = os.getenv('GCS_RAW_BUCKET')
+    # Get bucket names
+    raw_bucket = get_required_env_var('GCS_RAW_BUCKET')
+    processed_bucket = get_required_env_var('GCS_PROCESSED_BUCKET')
+    
+    # Extract blob paths
     companies_path = companies_uri.replace(f'gs://{raw_bucket}/', '')
     updates_path = updates_uri.replace(f'gs://{raw_bucket}/', '')
     jobs_path = jobs_uri.replace(f'gs://{raw_bucket}/', '')
@@ -262,7 +292,6 @@ def process_linkedin_raw_data(**context):
     
     # Generate filenames with timestamp
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-    processed_bucket = os.getenv('GCS_PROCESSED_BUCKET')
     
     # Upload processed data
     proc_companies_path = f'linkedin/processed/companies/companies_{timestamp}.json'
@@ -277,6 +306,41 @@ def process_linkedin_raw_data(**context):
     context['task_instance'].xcom_push(key='processed_companies_file', value=companies_uri)
     context['task_instance'].xcom_push(key='processed_updates_file', value=updates_uri)
     context['task_instance'].xcom_push(key='processed_jobs_file', value=jobs_uri)
+
+def aggregate_user_data_task(**context):
+    """
+    Aggregate processed data for each user and store the results.
+    """
+    # Get the processed bucket name
+    processed_bucket = get_required_env_var('GCS_PROCESSED_BUCKET')
+    
+    # Get list of user profiles
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(processed_bucket)
+    
+    # Process each user profile
+    for blob in bucket.list_blobs(prefix='user_profiles/'):
+        if not blob.name.endswith('.json'):
+            continue
+            
+        # Get user ID from filename
+        user_id = blob.name.split('/')[-1].replace('.json', '')
+        
+        try:
+            # Aggregate data for this user
+            aggregated_data = aggregate_user_data(
+                user_id=user_id,
+                processed_bucket=processed_bucket
+            )
+            
+            # Store aggregated data
+            uri = store_aggregated_data(aggregated_data, processed_bucket)
+            
+            # Log the result
+            print(f"Aggregated data for user {user_id} stored at: {uri}")
+        except Exception as e:
+            print(f"Error processing user {user_id}: {str(e)}")
+            continue
 
 with DAG(
     'data_ingestion_pipeline',
@@ -320,7 +384,17 @@ with DAG(
         python_callable=process_linkedin_raw_data,
     )
     
+    # Aggregate user data task
+    aggregate_data = PythonOperator(
+        task_id='aggregate_user_data',
+        python_callable=aggregate_user_data_task
+    )
+    
     # Set up task dependencies
-    spotify_task >> process_spotify_task
-    trends_task >> process_trends_task
-    linkedin_task >> process_linkedin_task 
+    spotify_task.set_downstream(process_spotify_task)
+    trends_task.set_downstream(process_trends_task)
+    linkedin_task.set_downstream(process_linkedin_task)
+    
+    process_spotify_task.set_downstream(aggregate_data)
+    process_trends_task.set_downstream(aggregate_data)
+    process_linkedin_task.set_downstream(aggregate_data) 
