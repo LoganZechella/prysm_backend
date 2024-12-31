@@ -77,17 +77,70 @@ def fetch_artist_data(sp_client, artist_ids):
     
     return artists_data
 
-def upload_to_gcs(data, bucket_name, blob_path):
-    """
-    Upload data to Google Cloud Storage.
-    """
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(blob_path)
+def test_spotify_ingestion():
+    print("Starting Spotify ingestion test...")
     
-    blob.upload_from_string(
-        json.dumps(data, indent=2),
-        content_type='application/json'
-    )
+    # Test Spotify client creation
+    try:
+        sp_client = get_spotify_client()
+        print("✓ Successfully created Spotify client")
+    except Exception as e:
+        print(f"✗ Failed to create Spotify client: {str(e)}")
+        return
     
-    return f"gs://{bucket_name}/{blob_path}" 
+    # Test fetching trending tracks
+    try:
+        tracks = fetch_trending_tracks(sp_client)
+        print(f"✓ Successfully fetched {len(tracks)} trending tracks")
+    except Exception as e:
+        print(f"✗ Failed to fetch trending tracks: {str(e)}")
+        return
+    
+    # Extract and fetch artist data
+    try:
+        artist_ids = set()
+        for track in tracks:
+            for artist in track['artists']:
+                if isinstance(artist, str):  # If it's just the name
+                    continue
+                if artist.get('id'):
+                    artist_ids.add(artist['id'])
+        
+        artists = fetch_artist_data(sp_client, list(artist_ids))
+        print(f"✓ Successfully fetched {len(artists)} artists")
+    except Exception as e:
+        print(f"✗ Failed to fetch artist data: {str(e)}")
+        return
+    
+    # Test GCS upload
+    try:
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(os.getenv('GCS_RAW_BUCKET'))
+        
+        # Upload tracks
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        tracks_blob = bucket.blob(f'spotify/raw/tracks/tracks_{timestamp}.json')
+        tracks_blob.upload_from_string(
+            json.dumps(tracks, indent=2),
+            content_type='application/json'
+        )
+        print(f"✓ Successfully uploaded tracks to {tracks_blob.name}")
+        
+        # Upload artists
+        artists_blob = bucket.blob(f'spotify/raw/artists/artists_{timestamp}.json')
+        artists_blob.upload_from_string(
+            json.dumps(artists, indent=2),
+            content_type='application/json'
+        )
+        print(f"✓ Successfully uploaded artists to {artists_blob.name}")
+        
+    except Exception as e:
+        print(f"✗ Failed to upload to GCS: {str(e)}")
+        return
+    
+    print("\nTest completed successfully! 🎉")
+    print(f"Tracks file: gs://{os.getenv('GCS_RAW_BUCKET')}/spotify/raw/tracks/tracks_{timestamp}.json")
+    print(f"Artists file: gs://{os.getenv('GCS_RAW_BUCKET')}/spotify/raw/artists/artists_{timestamp}.json")
+
+if __name__ == "__main__":
+    test_spotify_ingestion() 
