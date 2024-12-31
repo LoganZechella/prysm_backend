@@ -12,9 +12,9 @@ from utils.google_trends_utils import (
 )
 from utils.linkedin_utils import (
     get_linkedin_client,
-    fetch_company_info,
-    fetch_company_updates,
-    fetch_job_postings,
+    fetch_profile_info,
+    fetch_connections,
+    fetch_recent_activity,
     upload_to_gcs as upload_linkedin_to_gcs
 )
 from utils.data_processing_utils import (
@@ -130,50 +130,35 @@ def fetch_linkedin_data(**context):
     # Initialize LinkedIn client
     li_client = get_linkedin_client()
     
-    # Get target companies from environment variables
-    companies_str = get_required_env_var('LINKEDIN_TARGET_COMPANIES')
-    companies = [c.strip() for c in companies_str.split(',') if c.strip()]
-    
-    if not companies:
-        raise ValueError("No target companies specified in LINKEDIN_TARGET_COMPANIES")
-    
     # Get bucket name
     bucket_name = get_required_env_var('GCS_RAW_BUCKET')
     
-    all_company_info = []
-    all_company_updates = []
-    all_job_postings = []
-    
-    for company_id in companies:
-        try:
-            # Fetch company data
-            company_info = fetch_company_info(li_client, company_id)
-            company_updates = fetch_company_updates(li_client, company_id)
-            job_postings = fetch_job_postings(li_client, company_id)
-            
-            all_company_info.append(company_info)
-            all_company_updates.extend(company_updates)
-            all_job_postings.extend(job_postings)
-        except Exception as e:
-            print(f"Error fetching data for company {company_id}: {str(e)}")
-            continue
-    
-    # Generate filenames with timestamp
-    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-    
-    # Upload to GCS
-    companies_path = f'linkedin/raw/companies/companies_{timestamp}.json'
-    updates_path = f'linkedin/raw/updates/updates_{timestamp}.json'
-    jobs_path = f'linkedin/raw/jobs/jobs_{timestamp}.json'
-    
-    companies_uri = upload_linkedin_to_gcs(all_company_info, bucket_name, companies_path)
-    updates_uri = upload_linkedin_to_gcs(all_company_updates, bucket_name, updates_path)
-    jobs_uri = upload_linkedin_to_gcs(all_job_postings, bucket_name, jobs_path)
-    
-    # Push file paths to XCom for downstream tasks
-    context['task_instance'].xcom_push(key='companies_file', value=companies_uri)
-    context['task_instance'].xcom_push(key='updates_file', value=updates_uri)
-    context['task_instance'].xcom_push(key='jobs_file', value=jobs_uri)
+    try:
+        # Fetch user profile data
+        profile_info = fetch_profile_info(li_client)
+        connections = fetch_connections(li_client)
+        activities = fetch_recent_activity(li_client)
+        
+        # Generate filenames with timestamp
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        
+        # Upload to GCS
+        profile_path = f'linkedin/raw/profile/profile_{timestamp}.json'
+        connections_path = f'linkedin/raw/connections/connections_{timestamp}.json'
+        activities_path = f'linkedin/raw/activities/activities_{timestamp}.json'
+        
+        profile_uri = upload_linkedin_to_gcs(profile_info, bucket_name, profile_path)
+        connections_uri = upload_linkedin_to_gcs(connections, bucket_name, connections_path)
+        activities_uri = upload_linkedin_to_gcs(activities, bucket_name, activities_path)
+        
+        # Push file paths to XCom for downstream tasks
+        context['task_instance'].xcom_push(key='profile_file', value=profile_uri)
+        context['task_instance'].xcom_push(key='connections_file', value=connections_uri)
+        context['task_instance'].xcom_push(key='activities_file', value=activities_uri)
+        
+    except Exception as e:
+        print(f"Error fetching LinkedIn data: {str(e)}")
+        raise
 
 def process_spotify_raw_data(**context):
     """
@@ -265,47 +250,47 @@ def process_linkedin_raw_data(**context):
     """
     # Get file paths from XCom
     ti = context['task_instance']
-    companies_uri = ti.xcom_pull(task_ids='fetch_linkedin_data', key='companies_file')
-    updates_uri = ti.xcom_pull(task_ids='fetch_linkedin_data', key='updates_file')
-    jobs_uri = ti.xcom_pull(task_ids='fetch_linkedin_data', key='jobs_file')
+    profile_uri = ti.xcom_pull(task_ids='fetch_linkedin_data', key='profile_file')
+    connections_uri = ti.xcom_pull(task_ids='fetch_linkedin_data', key='connections_file')
+    activities_uri = ti.xcom_pull(task_ids='fetch_linkedin_data', key='activities_file')
     
     # Get bucket names
     raw_bucket = get_required_env_var('GCS_RAW_BUCKET')
     processed_bucket = get_required_env_var('GCS_PROCESSED_BUCKET')
     
     # Extract blob paths
-    companies_path = companies_uri.replace(f'gs://{raw_bucket}/', '')
-    updates_path = updates_uri.replace(f'gs://{raw_bucket}/', '')
-    jobs_path = jobs_uri.replace(f'gs://{raw_bucket}/', '')
+    profile_path = profile_uri.replace(f'gs://{raw_bucket}/', '')
+    connections_path = connections_uri.replace(f'gs://{raw_bucket}/', '')
+    activities_path = activities_uri.replace(f'gs://{raw_bucket}/', '')
     
     # Read raw data
-    companies_data = read_from_gcs(raw_bucket, companies_path)
-    updates_data = read_from_gcs(raw_bucket, updates_path)
-    jobs_data = read_from_gcs(raw_bucket, jobs_path)
+    profile_data = read_from_gcs(raw_bucket, profile_path)
+    connections_data = read_from_gcs(raw_bucket, connections_path)
+    activities_data = read_from_gcs(raw_bucket, activities_path)
     
     # Process data
-    processed_companies, processed_updates, processed_jobs = process_linkedin_data(
-        companies_data[0],  # Process first company for now
-        updates_data,
-        jobs_data
+    processed_profile, processed_connections, processed_activities = process_linkedin_data(
+        profile_data,
+        connections_data,
+        activities_data
     )
     
     # Generate filenames with timestamp
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
     
     # Upload processed data
-    proc_companies_path = f'linkedin/processed/companies/companies_{timestamp}.json'
-    proc_updates_path = f'linkedin/processed/updates/updates_{timestamp}.json'
-    proc_jobs_path = f'linkedin/processed/jobs/jobs_{timestamp}.json'
+    proc_profile_path = f'linkedin/processed/profile/profile_{timestamp}.json'
+    proc_connections_path = f'linkedin/processed/connections/connections_{timestamp}.json'
+    proc_activities_path = f'linkedin/processed/activities/activities_{timestamp}.json'
     
-    companies_uri = upload_processed_data(processed_companies, processed_bucket, proc_companies_path)
-    updates_uri = upload_processed_data(processed_updates, processed_bucket, proc_updates_path)
-    jobs_uri = upload_processed_data(processed_jobs, processed_bucket, proc_jobs_path)
+    profile_uri = upload_processed_data(processed_profile, processed_bucket, proc_profile_path)
+    connections_uri = upload_processed_data(processed_connections, processed_bucket, proc_connections_path)
+    activities_uri = upload_processed_data(processed_activities, processed_bucket, proc_activities_path)
     
     # Push processed file paths to XCom
-    context['task_instance'].xcom_push(key='processed_companies_file', value=companies_uri)
-    context['task_instance'].xcom_push(key='processed_updates_file', value=updates_uri)
-    context['task_instance'].xcom_push(key='processed_jobs_file', value=jobs_uri)
+    context['task_instance'].xcom_push(key='processed_profile_file', value=profile_uri)
+    context['task_instance'].xcom_push(key='processed_connections_file', value=connections_uri)
+    context['task_instance'].xcom_push(key='processed_activities_file', value=activities_uri)
 
 def aggregate_user_data_task(**context):
     """
