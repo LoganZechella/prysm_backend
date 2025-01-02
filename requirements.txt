@@ -2,10 +2,10 @@
 fastapi==0.104.1
 uvicorn==0.24.0
 python-multipart==0.0.6
-python-jose[cryptography]==3.3.0
+python-jose==3.3.0
 python-dotenv==1.0.0
-httpx==0.25.2
-pydantic==2.5.2
+httpx==0.25.1
+pydantic==2.5.1
 starlette==0.27.0
 
 # OAuth dependencies
@@ -20,4 +20,7 @@ pytest-cov==4.1.0
 # Type checking
 mypy==1.7.1
 types-python-jose==3.3.4
-types-jwt==3.3.7 
+types-jwt==3.3.7
+
+# Google Cloud Storage
+google-cloud-storage==2.13.0 

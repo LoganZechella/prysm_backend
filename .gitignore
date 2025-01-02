@@ -20,6 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 .cache
+prysm-airflow-sa-key.json
 # Virtual Environment
 venv/
 env/

@@ -5,9 +5,12 @@ from typing import Dict, List, Any, Optional
 import requests
 from google.cloud import storage
 from dotenv import load_dotenv
+import logging
 
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class EventbriteClient:
     """Client for interacting with Eventbrite API."""
@@ -23,6 +26,30 @@ class EventbriteClient:
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json'
         }
+        
+        # Get organization ID
+        self.org_id = self.get_organization()
+        if not self.org_id:
+            raise ValueError("Could not get organization ID")
+    
+    def get_organization(self) -> Optional[str]:
+        """Get the organization ID for the authenticated user."""
+        response = requests.get(
+            f"{self.BASE_URL}/users/me/organizations/",
+            headers=self.headers
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Error fetching organizations: {response.status_code} - {response.text}")
+            return None
+            
+        data = response.json()
+        organizations = data.get("organizations", [])
+        if not organizations:
+            logger.error("No organizations found")
+            return None
+            
+        return organizations[0]["id"]
     
     def search_events(
         self,
@@ -45,26 +72,33 @@ class EventbriteClient:
         Returns:
             Dictionary containing search results
         """
-        endpoint = f"{self.BASE_URL}/events/search"
-        
         params = {
+            'status': 'live',  # Only get live events
+            'time_filter': 'current_future',  # Only get current and future events
+            'order_by': 'start_asc',  # Order by start date ascending
             'page': page,
-            'expand': 'venue,ticket_availability,category,organizer'
+            'expand': 'venue,ticket_availability,category,organizer'  # Include additional data
         }
         
-        if location:
-            params['location.address'] = location
-        if categories:
-            params['categories'] = ','.join(categories)
-        if start_date:
-            params['start_date.range_start'] = start_date
-        if end_date:
-            params['start_date.range_end'] = end_date
-        
-        response = requests.get(endpoint, headers=self.headers, params=params)
+        response = requests.get(
+            f"{self.BASE_URL}/organizations/{self.org_id}/events/",
+            headers=self.headers,
+            params=params
+        )
         response.raise_for_status()
         
-        return response.json()
+        data = response.json()
+        
+        # Filter events based on location if provided
+        if location:
+            filtered_events = []
+            for event in data.get("events", []):
+                venue = event.get("venue", {})
+                if venue and venue.get("address", {}).get("city", "").lower() in location.lower():
+                    filtered_events.append(event)
+            data["events"] = filtered_events
+            
+        return data
     
     def get_event_details(self, event_id: str) -> Dict[str, Any]:
         """
