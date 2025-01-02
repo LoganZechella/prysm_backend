@@ -13,25 +13,32 @@ class Token(BaseModel):
     expires_in: int
     token_type: str
     scope: Optional[str] = None
-    created_at: str = ""
+    created_at: str = datetime.utcnow().isoformat()
 
-    def __init__(self, **data):
-        if "created_at" not in data:
-            data["created_at"] = datetime.utcnow().isoformat()
-        super().__init__(**data)
-
-    class Config:
-        arbitrary_types_allowed = True
+    def dict(self, *args, **kwargs) -> Dict[str, Any]:
+        """Override dict method to ensure datetime is serialized"""
+        d = super().dict(*args, **kwargs)
+        if isinstance(d.get("created_at"), datetime):
+            d["created_at"] = d["created_at"].isoformat()
+        return d
 
     @classmethod
-    def from_token_data(cls, token_data: Dict[str, Any]):
+    def from_token_data(cls, token_data: Dict[str, Any]) -> "Token":
+        """Create a Token instance from OAuth response data"""
         return cls(
             access_token=token_data["access_token"],
             refresh_token=token_data.get("refresh_token"),
             expires_in=token_data["expires_in"],
             token_type=token_data["token_type"],
-            scope=token_data.get("scope")
+            scope=token_data.get("scope"),
+            created_at=datetime.utcnow().isoformat()
         )
+
+    def is_expired(self) -> bool:
+        """Check if the token is expired"""
+        created = datetime.fromisoformat(self.created_at)
+        expiry_time = created + timedelta(seconds=self.expires_in)
+        return datetime.utcnow() > expiry_time
 
 class TokenManager:
     def __init__(self, request: Request):
@@ -55,11 +62,6 @@ class TokenManager:
             token_data = self.session.get(f"{service}_token")
             if not token_data:
                 return None
-            
-            # Convert ISO format string back to datetime
-            if isinstance(token_data.get("created_at"), str):
-                token_data["created_at"] = datetime.fromisoformat(token_data["created_at"])
-                
             return Token(**token_data)
         except Exception as e:
             logger.error(f"Error retrieving token for {service}: {str(e)}")
@@ -71,10 +73,7 @@ class TokenManager:
             token = self.get_token(service)
             if not token:
                 return False
-                
-            created_at = datetime.fromisoformat(token.created_at)
-            expiry_time = created_at + timedelta(seconds=token.expires_in)
-            return datetime.utcnow() < expiry_time
+            return not token.is_expired()
         except Exception as e:
             logger.error(f"Error checking token validity for {service}: {str(e)}")
             return False
