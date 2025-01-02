@@ -15,6 +15,7 @@ import axios from 'axios'
 
 // Configure axios defaults
 axios.defaults.withCredentials = true
+axios.defaults.headers.common['Content-Type'] = 'application/json'
 
 interface AuthStatus {
   spotify: boolean
@@ -33,7 +34,8 @@ const AuthDashboard = () => {
 
   const checkAuthStatus = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/auth/status', {
+      const response = await axios.get('/api/auth/status', {
+        withCredentials: true,
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
@@ -62,12 +64,12 @@ const AuthDashboard = () => {
   }, [])
 
   const handleLogin = (service: string) => {
-    window.location.href = `http://localhost:8000/auth/${service}`
+    window.location.href = `/api/auth/${service}`
   }
 
   const handleLogout = async () => {
     try {
-      await axios.post('http://localhost:8000/auth/logout', {}, {
+      await axios.post('/api/auth/logout', {}, {
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
