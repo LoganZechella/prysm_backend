@@ -52,6 +52,11 @@ class SourceInfo(BaseModel):
     url: str
     last_updated: datetime = Field(default_factory=datetime.utcnow)
 
+    class Config:
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat()
+        }
+
 class EventMetadata(BaseModel):
     popularity_score: float = 0.0
     social_mentions: int = 0
@@ -76,6 +81,11 @@ class Event(BaseModel):
     images: List[str] = Field(default_factory=list)
     source: SourceInfo
     metadata: EventMetadata = Field(default_factory=EventMetadata)
+
+    class Config:
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat()
+        }
 
     @validator('end_datetime', always=True)
     def set_end_datetime(cls, v, values):

@@ -22,8 +22,8 @@ class MetaCollector:
             raise ValueError("META_APP_ID and META_APP_SECRET environment variables must be set")
         
         self.base_url = "https://graph.facebook.com/v19.0"  # Using latest stable version
+        # Don't set Authorization header, we'll pass token as a parameter
         self.headers = {
-            "Authorization": f"Bearer {self.access_token}",
             "Accept": "application/json"
         }
         logger.info("Initialized Meta collector")
@@ -31,11 +31,12 @@ class MetaCollector:
     async def verify_token(self) -> bool:
         """Verify that the access token is valid"""
         async with httpx.AsyncClient() as client:
+            # Pass token as a parameter instead of header
             response = await client.get(
-                f"{self.base_url}/debug_token",
+                f"{self.base_url}/me",
                 params={
-                    "input_token": self.access_token,
-                    "access_token": f"{self.app_id}|{self.app_secret}"
+                    "access_token": self.access_token,
+                    "fields": "id,name"
                 }
             )
             
@@ -44,12 +45,11 @@ class MetaCollector:
                 return False
                 
             data = response.json()
-            is_valid = data.get("data", {}).get("is_valid", False)
-            if not is_valid:
+            if "id" not in data:
                 logger.error(f"Token is invalid: {data}")
                 return False
                 
-            logger.info("Token verified successfully")
+            logger.info(f"Token verified successfully for user {data.get('name', 'Unknown')}")
             return True
             
     async def search_events(
@@ -98,8 +98,8 @@ class MetaCollector:
             logger.info("Getting user's pages")
             pages_response = await client.get(
                 f"{self.base_url}/me/accounts",
-                headers=self.headers,
                 params={
+                    "access_token": self.access_token,
                     "fields": "id,name,access_token",
                     "limit": "10"  # Limit to 10 pages for now
                 }
@@ -115,13 +115,8 @@ class MetaCollector:
                     page_id = page_info["id"]
                     page_token = page_info.get("access_token", self.access_token)
                     
-                    # Use the page's access token for better permissions
-                    page_headers = {
-                        "Authorization": f"Bearer {page_token}",
-                        "Accept": "application/json"
-                    }
-                    
                     events_params = {
+                        "access_token": page_token,
                         "fields": ",".join(fields),
                         "time_filter": "upcoming"
                     }
@@ -132,7 +127,6 @@ class MetaCollector:
                     logger.info(f"Getting events for page {page_info['name']} ({page_id})")
                     events_response = await client.get(
                         f"{self.base_url}/{page_id}/events",
-                        headers=page_headers,
                         params=events_params
                     )
                     
@@ -150,8 +144,8 @@ class MetaCollector:
             logger.info("Getting user's groups")
             groups_response = await client.get(
                 f"{self.base_url}/me/groups",
-                headers=self.headers,
                 params={
+                    "access_token": self.access_token,
                     "fields": "id,name",
                     "limit": "10"  # Limit to 10 groups for now
                 }
@@ -166,6 +160,7 @@ class MetaCollector:
                 for group in groups:
                     group_id = group["id"]
                     events_params = {
+                        "access_token": self.access_token,
                         "fields": ",".join(fields),
                         "time_filter": "upcoming"
                     }
@@ -176,7 +171,6 @@ class MetaCollector:
                     logger.info(f"Getting events for group {group['name']} ({group_id})")
                     events_response = await client.get(
                         f"{self.base_url}/{group_id}/events",
-                        headers=self.headers,
                         params=events_params
                     )
                     
@@ -190,37 +184,7 @@ class MetaCollector:
             else:
                 logger.error(f"Meta API error getting groups: {groups_response.status_code} - {groups_response.text}")
             
-            # Finally, try to get events the user is interested in or attending
-            logger.info("Getting user's events")
-            user_events_response = await client.get(
-                f"{self.base_url}/me/events",
-                headers=self.headers,
-                params={
-                    "fields": ",".join(fields),
-                    "time_filter": "upcoming"
-                }
-            )
-            
-            if user_events_response.status_code == 200:
-                user_events_data = user_events_response.json()
-                user_events = user_events_data.get("data", [])
-                logger.info(f"Found {len(user_events)} events for user")
-                all_events.extend(user_events)
-            else:
-                logger.error(f"Meta API error getting user events: {user_events_response.status_code} - {user_events_response.text}")
-            
-            # Remove duplicates based on event ID
-            seen_ids = set()
-            unique_events = []
-            for event in all_events:
-                if event["id"] not in seen_ids:
-                    seen_ids.add(event["id"])
-                    unique_events.append(event)
-            
-            return {
-                "data": unique_events,
-                "paging": {}  # We'll need to handle pagination differently since we're combining multiple sources
-            }
+            return {"data": all_events, "paging": {}}
             
     def transform_event(self, meta_event: Dict[str, Any]) -> Event:
         """Transform Meta event data into our standard Event schema"""
@@ -340,3 +304,64 @@ class MetaCollector:
             page_count += 1
             
         return all_events 
+
+    async def get_long_lived_token(self) -> Optional[str]:
+        """Exchange short-lived token for a long-lived one"""
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/oauth/access_token",
+                params={
+                    "grant_type": "fb_exchange_token",
+                    "client_id": self.app_id,
+                    "client_secret": self.app_secret,
+                    "fb_exchange_token": self.access_token,
+                    "access_token": f"{self.app_id}|{self.app_secret}"  # Use app access token for auth
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to get long-lived token: {response.status_code} - {response.text}")
+                return None
+                
+            data = response.json()
+            new_token = data.get("access_token")
+            if not new_token:
+                logger.error("No access token in response")
+                return None
+                
+            logger.info("Successfully obtained long-lived token")
+            return new_token
+            
+    async def initialize(self) -> bool:
+        """Initialize the collector with a long-lived token"""
+        # First try to verify if current token is valid
+        if await self.verify_token():
+            logger.info("Current token is valid, skipping token exchange")
+            return True
+            
+        # If current token is not valid, try to exchange it for a long-lived one
+        long_lived_token = await self.get_long_lived_token()
+        if long_lived_token:
+            self.access_token = long_lived_token
+            self.headers["Authorization"] = f"Bearer {self.access_token}"
+            return True
+        return False
+
+    async def get_categories(self) -> List[Dict[str, Any]]:
+        """Get list of available event categories"""
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/event_categories",
+                params={
+                    "access_token": self.access_token
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to get categories: {response.status_code} - {response.text}")
+                return []
+                
+            data = response.json()
+            categories = data.get("data", [])
+            logger.info(f"Found {len(categories)} categories")
+            return categories 
