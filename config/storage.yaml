@@ -1,0 +1,34 @@
+# AWS Storage Configuration
+
+# S3 Configuration
+s3:
+  bucket_name: prysm-events
+  region: us-west-2
+  lifecycle_rules:
+    raw_data_retention_days: 90
+    processed_data_retention_days: 30
+  versioning: enabled
+
+# DynamoDB Configuration
+dynamodb:
+  table_name: prysm-events
+  region: us-west-2
+  capacity:
+    read_units: 5
+    write_units: 5
+  indexes:
+    - name: start_datetime-index
+      key: start_datetime
+      type: hash
+    - name: location-index
+      key: location_hash
+      type: hash
+  stream:
+    enabled: true
+    view_type: NEW_AND_OLD_IMAGES
+
+# Storage Manager Configuration
+manager:
+  default_region: us-west-2
+  fallback_strategy: s3  # When DynamoDB fails, fall back to S3
+  batch_size: 25  # Maximum number of events to process in a batch 
