@@ -1,5 +1,5 @@
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from app.utils.schema import Event, UserPreferences
 from app.utils.recommendation import RecommendationEngine
@@ -57,7 +57,7 @@ class EventProcessor:
         event: Event,
         candidate_events: List[Event],
         num_similar: int = 5
-    ) -> List[Event]:
+    ) -> List[Tuple[Event, float]]:
         """Get similar events to a given event"""
         try:
             similar_events = self.recommendation_engine.get_similar_events(
@@ -65,7 +65,7 @@ class EventProcessor:
                 candidate_events,
                 n=num_similar
             )
-            return [event for event, _ in similar_events]
+            return similar_events
             
         except Exception as e:
             logger.error(f"Error getting similar events: {str(e)}")
