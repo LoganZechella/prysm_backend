@@ -1,0 +1,28 @@
+aws:
+  credentials:
+    access_key_id: ${AWS_ACCESS_KEY_ID}
+    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+    session_token: ${AWS_SESSION_TOKEN}  # Optional
+  default_region: us-west-2
+  s3:
+    bucket_prefix: prysm-events-test
+    versioning: enabled
+    lifecycle_rules:
+      raw_data_retention_days: 90
+      processed_data_retention_days: 30
+    cors:
+      allowed_origins:
+        - "*"  # Replace with specific origins in production
+      allowed_methods:
+        - GET
+        - PUT
+        - POST
+      allowed_headers:
+        - "*"
+      max_age_seconds: 3600
+  dynamodb:
+    endpoint: null  # Use AWS default endpoint
+    table_prefix: prysm
+    backup:
+      enabled: true
+      frequency: daily  # daily, weekly, or monthly 
