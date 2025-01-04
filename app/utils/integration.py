@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from app.collectors.meta import MetaCollector
 from app.collectors.eventbrite import EventbriteCollector
@@ -8,6 +8,7 @@ from app.utils.event_processing import process_event
 from app.utils.storage import StorageManager
 from app.utils.schema import Event, Location, PriceInfo, SourceInfo, EventAttributes
 import json
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -15,16 +16,21 @@ class EventIntegration:
     """Integration layer between collectors and processing pipeline"""
     
     def __init__(self):
-        self.meta_collector = MetaCollector()
-        self.eventbrite_collector = EventbriteCollector()
+        # Initialize collectors with API keys from environment variables
+        self.meta_collector = MetaCollector(access_token=os.getenv("META_ACCESS_TOKEN", ""))
+        self.eventbrite_collector = EventbriteCollector(api_key=os.getenv("EVENTBRITE_API_KEY", ""))
         self.scraper = EventScraper()
         self.storage = StorageManager()
         
     async def process_event(self, event: Event) -> Event:
         """Process an event by enriching it with additional data"""
-        # TODO: Add event processing logic
-        # For now, just return the event as is
-        return event
+        try:
+            # Process event using the event processing pipeline
+            processed_event = await process_event(event)
+            return processed_event
+        except Exception as e:
+            logger.error(f"Error processing event {event.event_id}: {str(e)}")
+            raise
 
     async def collect_and_process_events(
         self,
@@ -166,7 +172,7 @@ class EventIntegration:
                 try:
                     event_data = await self.storage.get_processed_event(blob_name)
                     if event_data:
-                        event = Event.from_raw_data(event_data)
+                        event = Event.model_validate(event_data)
                         
                         # Filter by date range if specified
                         if start_date and event.start_datetime < start_date:

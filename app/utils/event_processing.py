@@ -1,19 +1,21 @@
 import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
-from app.utils.schema import Event, Location, PriceInfo, SourceInfo
+from app.utils.schema import Event, Location, PriceInfo, SourceInfo, ImageAnalysis
 from app.utils.category_hierarchy import (
     create_default_hierarchy,
     extract_categories,
     map_platform_categories
 )
 from app.utils.location_services import geocode_address
+from app.utils.image_processing import ImageProcessor
 import re
 from collections import Counter
 import spacy
 from transformers import pipeline
 import torch
 import subprocess
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,46 @@ sentiment_analyzer = pipeline(
 
 # Initialize category hierarchy
 category_hierarchy = create_default_hierarchy()
+
+# Initialize image processor
+image_processor = ImageProcessor(os.getenv("GCS_PROCESSED_BUCKET", "prysm-processed-data"))
+
+async def process_images(event: Event) -> Event:
+    """Process and analyze event images"""
+    if not event.images:
+        return event
+    
+    # Process each image
+    for i, image_url in enumerate(event.images):
+        try:
+            # Download image
+            image_data = await image_processor.download_image(image_url)
+            if not image_data:
+                continue
+            
+            # Store image
+            stored_url = await image_processor.store_image(image_data, event.event_id, i)
+            
+            # Analyze image
+            analysis_results = await image_processor.analyze_image(image_data)
+            
+            # Create ImageAnalysis object
+            image_analysis = ImageAnalysis(
+                url=image_url,
+                stored_url=stored_url,
+                scene_classification=analysis_results.get("scene_classification", {}),
+                crowd_density=analysis_results.get("crowd_density", {}),
+                objects=analysis_results.get("objects", []),
+                safe_search=analysis_results.get("safe_search", {})
+            )
+            
+            event.image_analysis.append(image_analysis)
+            
+        except Exception as e:
+            logger.error(f"Error processing image {image_url}: {str(e)}")
+            continue
+    
+    return event
 
 def clean_event_data(event: Event) -> Event:
     """Clean and standardize event data"""
@@ -112,13 +154,28 @@ def calculate_sentiment_scores(text: str) -> Dict[str, float]:
         logger.error(f"Error calculating sentiment scores: {str(e)}")
         return {'positive': 0.5, 'negative': 0.5}
 
-def enrich_event(event: Event) -> Event:
+async def enrich_event(event: Event) -> Event:
     """Enrich event with additional data"""
+    # Process images first as it might provide useful context
+    event = await process_images(event)
+    
     # Extract topics and categories from title and description
     text = f"{event.title} {event.description}"
     
     # Extract categories from text
     text_categories = extract_categories(text, category_hierarchy)
+    
+    # Add categories from image analysis if available
+    for analysis in event.image_analysis:
+        # Add scene categories if confidence is high enough
+        for scene, confidence in analysis.scene_classification.items():
+            if confidence > 0.7:  # Only use high-confidence scenes
+                text_categories.add(scene.lower())
+        
+        # Add object categories
+        for obj in analysis.objects:
+            if obj["confidence"] > 0.7:  # Only use high-confidence objects
+                text_categories.add(obj["name"].lower())
     
     # Map platform categories if available
     platform_categories = []
@@ -129,7 +186,7 @@ def enrich_event(event: Event) -> Event:
             category_hierarchy
         )
     
-    # Combine categories from both sources
+    # Combine categories from all sources
     all_categories = text_categories.union(platform_categories)
     
     # Update event with hierarchical categories
@@ -145,12 +202,20 @@ def enrich_event(event: Event) -> Event:
     # Process text with spaCy for additional insights
     doc = nlp(text)
     
-    # Set indoor/outdoor attribute
+    # Set indoor/outdoor attribute using both text and image analysis
     outdoor_indicators = ['outdoor', 'outside', 'park', 'garden', 'field', 'beach']
     indoor_indicators = ['indoor', 'inside', 'hall', 'room', 'venue', 'theater']
     
     outdoor_score = sum(1 for token in doc if any(ind in token.text.lower() for ind in outdoor_indicators))
     indoor_score = sum(1 for token in doc if any(ind in token.text.lower() for ind in indoor_indicators))
+    
+    # Add scores from image analysis
+    for analysis in event.image_analysis:
+        scenes = analysis.scene_classification
+        if any(scene.lower() in outdoor_indicators for scene in scenes):
+            outdoor_score += 2
+        if any(scene.lower() in indoor_indicators for scene in scenes):
+            indoor_score += 2
     
     if outdoor_score > indoor_score:
         event.attributes.indoor_outdoor = 'outdoor'
@@ -217,9 +282,9 @@ def classify_event(event: Event) -> Event:
     
     return event
 
-def process_event(event: Event) -> Event:
+async def process_event(event: Event) -> Event:
     """Process an event through the complete pipeline"""
     event = clean_event_data(event)
-    event = enrich_event(event)
+    event = await enrich_event(event)
     event = classify_event(event)
     return event 

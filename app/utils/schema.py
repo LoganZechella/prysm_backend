@@ -1,5 +1,5 @@
-from typing import Dict, Any, Optional, Mapping, List, Set
-from datetime import datetime, timedelta
+from typing import Dict, Any, Optional, Mapping, List, Set, Tuple
+from datetime import datetime, timedelta, time
 import json
 from pydantic import BaseModel, Field, field_validator, ConfigDict, model_validator, ValidationInfo
 from typing import List, Union
@@ -132,6 +132,15 @@ class CategoryHierarchy(BaseModel):
                     return category
         return None
 
+class ImageAnalysis(BaseModel):
+    """Results of image analysis"""
+    url: str
+    stored_url: Optional[str] = None
+    scene_classification: Dict[str, float] = Field(default_factory=dict)
+    crowd_density: Dict[str, Any] = Field(default_factory=dict)
+    objects: List[Dict[str, Any]] = Field(default_factory=list)
+    safe_search: Dict[str, str] = Field(default_factory=dict)
+
 class Event(BaseModel):
     event_id: str
     title: str
@@ -147,10 +156,11 @@ class Event(BaseModel):
     extracted_topics: List[str] = Field(default_factory=list)
     sentiment_scores: Dict[str, float] = Field(default_factory=dict)
     images: List[str] = Field(default_factory=list)
+    image_analysis: List[ImageAnalysis] = Field(default_factory=list)
     source: SourceInfo
     metadata: EventMetadata = Field(default_factory=EventMetadata)
-    category_hierarchy: Dict[str, List[str]] = Field(default_factory=dict)  # category -> ancestors
-    raw_categories: List[str] = Field(default_factory=list)  # Original categories from source platform
+    category_hierarchy: Dict[str, List[str]] = Field(default_factory=dict)
+    raw_categories: List[str] = Field(default_factory=list)
 
     model_config = ConfigDict(
         ser_json_timedelta="iso8601",
@@ -196,3 +206,49 @@ class Event(BaseModel):
         for category in self.categories:
             all_cats.update(self.category_hierarchy.get(category, []))
         return all_cats 
+
+class UserPreferences(BaseModel):
+    """User preferences for event recommendations"""
+    user_id: str
+    preferred_categories: List[str] = Field(default_factory=list)
+    price_preferences: List[str] = Field(default_factory=list)  # List of acceptable price tiers
+    preferred_location: Optional[Dict[str, float]] = None  # lat/lng coordinates
+    preferred_radius: float = 50.0  # kilometers
+    preferred_times: List[Tuple[time, time]] = Field(default_factory=list)  # List of time ranges
+    excluded_categories: List[str] = Field(default_factory=list)
+    min_rating: float = 0.0
+    max_price: Optional[float] = None
+    accessibility_requirements: List[str] = Field(default_factory=list)
+    indoor_outdoor_preference: Optional[str] = None  # 'indoor', 'outdoor', or 'both'
+    age_restriction_preference: Optional[str] = None  # '18+', '21+', 'all'
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "user_id": "user123",
+                "preferred_categories": ["music", "art", "food"],
+                "price_preferences": ["free", "budget", "medium"],
+                "preferred_location": {"lat": 37.7749, "lng": -122.4194},
+                "preferred_radius": 25.0,
+                "preferred_times": [
+                    ["18:00", "23:00"],
+                    ["12:00", "15:00"]
+                ],
+                "excluded_categories": ["sports"],
+                "min_rating": 4.0,
+                "max_price": 100.0,
+                "accessibility_requirements": ["wheelchair"],
+                "indoor_outdoor_preference": "both",
+                "age_restriction_preference": "all"
+            }
+        }
+    )
+    
+    @classmethod
+    def from_json(cls, json_str: str) -> 'UserPreferences':
+        """Create preferences from JSON string"""
+        return cls.model_validate_json(json_str)
+    
+    def to_json(self) -> str:
+        """Convert preferences to JSON string"""
+        return self.model_dump_json(exclude_unset=True) 
