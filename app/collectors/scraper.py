@@ -93,6 +93,11 @@ class EventScraper:
                     title = title_elem.text.strip()
                     logger.info(f"Found event: {title}")
                     
+                    # Extract description
+                    description_elem = card.find('p', {'class': lambda x: x and 'Typography_body-md__487rx' in x})
+                    description = description_elem.text.strip() if description_elem else ""
+                    short_description = description[:200] + "..." if len(description) > 200 else description
+                    
                     # Extract date and time
                     date_elem = card.find('p', {'class': lambda x: x and 'Typography_body-md-bold__487rx' in x})
                     date_str = date_elem.text.strip() if date_elem else ""
@@ -129,8 +134,8 @@ class EventScraper:
                     event = Event(
                         event_id=f"eventbrite_{hash(title + str(start_datetime))}",
                         title=title,
-                        description="",  # Description not available in card view
-                        short_description="",
+                        description=description,
+                        short_description=short_description,
                         start_datetime=start_datetime,
                         end_datetime=start_datetime + timedelta(hours=3),  # Default duration
                         location=Location(
@@ -172,31 +177,75 @@ class EventScraper:
     def _parse_eventbrite_datetime(self, date_str: str, time_str: str) -> datetime:
         """Parse Eventbrite date and time strings into datetime object"""
         try:
-            # Example: "Sat, Jan 20" and "7:00 PM"
-            date_parts = date_str.replace(',', '').split()
-            if len(date_parts) == 2:
-                # Add current year if not provided
-                date_parts.append(str(datetime.utcnow().year))
-            
-            date_str = ' '.join(date_parts)
-            datetime_str = f"{date_str} {time_str}"
-            
+            if not date_str:
+                logger.warning("Empty date string provided")
+                return datetime.utcnow()
+
+            # Handle "Check ticket price on event" case
+            if "Check ticket price" in date_str:
+                logger.warning("No date available in event listing")
+                return datetime.utcnow()
+
+            # Handle "Today" and "Tomorrow" cases
+            if "Today" in date_str:
+                date_str = datetime.utcnow().strftime("%a %b %d")
+            elif "Tomorrow" in date_str:
+                tomorrow = datetime.utcnow() + timedelta(days=1)
+                date_str = tomorrow.strftime("%a %b %d")
+
+            # Clean up the date string
+            date_str = date_str.replace("•", "").replace(",", "").strip()
+            if time_str:
+                time_str = time_str.replace("•", "").strip()
+
+            # Extract timezone if present
+            timezone = None
+            for tz in ["PST", "EST", "GMT"]:
+                if tz in date_str:
+                    timezone = tz
+                    date_str = date_str.replace(tz, "").strip()
+                if time_str and tz in time_str:
+                    timezone = tz
+                    time_str = time_str.replace(tz, "").strip()
+
+            # Combine date and time
+            datetime_str = date_str
+            if time_str:
+                datetime_str = f"{date_str} {time_str}"
+
             # Try different format patterns
             formats = [
-                "%a %b %d %Y %I:%M %p",
-                "%a %b %d %Y %H:%M",
-                "%Y-%m-%d %H:%M"
+                "%a %b %d %I:%M %p",  # Sun Jan 12 1:30 PM
+                "%a %b %d • %I:%M %p",  # Sun Jan 12 • 1:30 PM
+                "%a %b %d %H:%M",  # Sun Jan 12 13:30
+                "%Y-%m-%d %H:%M",  # 2024-01-12 13:30
+                "%a %b %d",  # Sun Jan 12 (no time)
+                "%A • %I:%M %p",  # Monday • 5:00 PM
+                "%A %I:%M %p",  # Monday 5:00 PM
+                "%a %b %d %Y",  # Sun Jan 12 2024
+                "%a %b %d %Y %I:%M %p",  # Sun Jan 12 2024 1:30 PM
             ]
+
+            current_year = datetime.utcnow().year
             
             for fmt in formats:
                 try:
-                    return datetime.strptime(datetime_str, fmt)
+                    dt = datetime.strptime(datetime_str, fmt)
+                    # Add current year if not in the format
+                    if dt.year == 1900:
+                        dt = dt.replace(year=current_year)
+                    # Add current time if not in the format
+                    if dt.hour == 0 and dt.minute == 0 and ":%M" not in fmt:
+                        now = datetime.utcnow()
+                        dt = dt.replace(hour=now.hour, minute=now.minute)
+                    # Ensure timezone is UTC
+                    return dt.replace(tzinfo=None)
                 except ValueError:
                     continue
-                    
-            # If no format matches, use current time
+
+            logger.warning(f"Could not parse datetime from '{date_str}' and '{time_str}', using current time")
             return datetime.utcnow()
-            
+
         except Exception as e:
             logger.error(f"Error parsing datetime: {str(e)}")
             return datetime.utcnow()

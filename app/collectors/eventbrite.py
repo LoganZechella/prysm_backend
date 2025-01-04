@@ -5,190 +5,42 @@ from typing import Dict, List, Any, Optional
 import logging
 from app.utils.schema import Event, Location, PriceInfo, SourceInfo
 import json
+from app.utils.category_hierarchy import create_default_hierarchy, map_platform_categories
 
 logger = logging.getLogger(__name__)
 
 class EventbriteCollector:
     """Collector for Eventbrite events"""
     
-    def __init__(self):
-        self.token = os.getenv("EVENTBRITE_PRIVATE_TOKEN")
-        if not self.token:
-            raise ValueError("EVENTBRITE_PRIVATE_TOKEN environment variable is not set")
-        logger.info(f"Using Eventbrite private token: {self.token[:5]}...")  # Log first 5 chars for verification
-        
+    def __init__(self, api_key: str):
+        self.api_key = api_key
         self.base_url = "https://www.eventbriteapi.com/v3"
         self.headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
-        logger.info("Initialized Eventbrite collector")
+        self.category_hierarchy = create_default_hierarchy()
 
-    async def get_organization(self) -> Optional[str]:
-        """Get the organization ID for the authenticated user"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/users/me/organizations/",
-                headers=self.headers
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Error fetching organizations: {response.status_code} - {response.text}")
-                return None
-                
-            data = response.json()
-            logger.info(f"Organizations response: {json.dumps(data, indent=2)}")
-            
-            organizations = data.get("organizations", [])
-            if not organizations:
-                logger.error("No organizations found")
-                return None
-                
-            return organizations[0]["id"]
-
-    async def verify_token(self) -> bool:
-        """Verify that the token works by calling /users/me endpoint"""
-        async with httpx.AsyncClient() as client:
-            # Try with Authorization header
-            response = await client.get(
-                f"{self.base_url}/users/me/",
-                headers=self.headers
-            )
-            
-            if response.status_code == 200:
-                logger.info("Token verified successfully using Authorization header")
-                return True
-                
-            # If that fails, try with token parameter
-            response = await client.get(
-                f"{self.base_url}/users/me/",
-                params={"token": self.token}
-            )
-            
-            if response.status_code == 200:
-                logger.info("Token verified successfully using token parameter")
-                return True
-                
-            logger.error(f"Token verification failed: {response.status_code} - {response.text}")
-            logger.error(f"Response headers: {response.headers}")
-            return False
-
-    async def create_organization(self) -> Optional[str]:
-        """Create a new organization if none exists"""
-        async with httpx.AsyncClient() as client:
-            # First check if we already have an organization
-            response = await client.get(
-                f"{self.base_url}/users/me/organizations/",
-                headers=self.headers
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                organizations = data.get("organizations", [])
-                if organizations:
-                    return organizations[0]["id"]
-            
-            # Create new organization
-            org_data = {
-                "name": "Event Collection Organization",
-                "description": {
-                    "text": "Organization for collecting event data"
-                }
-            }
-            
-            response = await client.post(
-                f"{self.base_url}/organizations/",
-                headers=self.headers,
-                json=org_data
-            )
-            
-            if response.status_code != 201:
-                logger.error(f"Error creating organization: {response.status_code} - {response.text}")
-                return None
-                
-            data = response.json()
-            return data["id"]
-
-    async def search_events(
-        self,
-        location: Optional[str] = None,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        categories: Optional[List[str]] = None,
-        page: int = 1
-    ) -> Dict[str, Any]:
-        """Search for events on Eventbrite using discovery API"""
-        
-        # First verify the token
-        if not await self.verify_token():
-            logger.error("Token verification failed, cannot proceed with search")
-            return {"events": [], "pagination": {"has_more_items": False}}
-        
-        # Set default date range if not provided
-        if not start_date:
-            start_date = datetime.utcnow()
-        if not end_date:
-            end_date = start_date + timedelta(days=30)  # Default to next 30 days
-            
-        params = {
-            "expand": "venue,ticket_availability,organizer,category",  # Include additional data
-            "page": page,
-            "sort_by": "date",  # Sort by date ascending
-            "location.address": location if location else "San Francisco, CA",
-            "location.within": "10km",  # Search within 10km radius
-            "start_date.range_start": start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "start_date.range_end": end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-        }
-        
-        if categories:
-            params["categories"] = ",".join(categories)
-            
-        async with httpx.AsyncClient() as client:
-            logger.info(f"Searching events with params: {params}")
-            response = await client.get(
-                f"{self.base_url}/discovery/v2/events/",
-                headers=self.headers,
-                params=params
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"Eventbrite API error: {response.status_code} - {response.text}")
-                logger.error(f"Request URL: {response.url}")
-                return {"events": [], "pagination": {"has_more_items": False}}
-                
-            data = response.json()
-            return data
-
-    def transform_event(self, eventbrite_event: Dict[str, Any]) -> Event:
-        """Transform Eventbrite event data into our standard Event schema"""
-        
+    def _convert_to_event(self, event_data: Dict[str, Any]) -> Event:
+        """Convert Eventbrite event data to our Event model"""
         # Extract venue information
-        venue = eventbrite_event.get("venue", {})
+        venue = event_data.get("venue", {})
         address = venue.get("address", {})
         
         # Extract price information
-        ticket_info = eventbrite_event.get("ticket_availability", {})
-        min_price = ticket_info.get("minimum_ticket_price", {}).get("value", 0)
-        max_price = ticket_info.get("maximum_ticket_price", {}).get("value", min_price)
+        ticket_info = event_data.get("ticket_classes", [{}])[0]
+        min_price = float(ticket_info.get("cost", {}).get("actual", {}).get("value", 0))
+        max_price = float(ticket_info.get("cost", {}).get("actual", {}).get("value", 0))
+        currency = ticket_info.get("cost", {}).get("currency", "USD")
         
-        # Determine price tier
-        if min_price == 0:
-            price_tier = "free"
-        elif min_price < 20:
-            price_tier = "budget"
-        elif min_price < 50:
-            price_tier = "medium"
-        else:
-            price_tier = "premium"
-            
-        return Event(
-            event_id=f"eventbrite_{eventbrite_event['id']}",
-            title=eventbrite_event["name"]["text"],
-            description=eventbrite_event["description"]["text"],
-            short_description=eventbrite_event["summary"],
-            start_datetime=datetime.fromisoformat(eventbrite_event["start"]["utc"]),
-            end_datetime=datetime.fromisoformat(eventbrite_event["end"]["utc"]),
+        # Create Event object
+        event = Event(
+            event_id=event_data["id"],
+            title=event_data["name"]["text"],
+            description=event_data["description"]["text"],
+            short_description=event_data["description"]["text"][:200] + "..." if len(event_data["description"]["text"]) > 200 else event_data["description"]["text"],
+            start_datetime=datetime.fromisoformat(event_data["start"]["utc"].replace("Z", "+00:00")),
+            end_datetime=datetime.fromisoformat(event_data["end"]["utc"].replace("Z", "+00:00")),
             location=Location(
                 venue_name=venue.get("name", ""),
                 address=address.get("address_1", ""),
@@ -200,64 +52,31 @@ class EventbriteCollector:
                     "lng": float(venue.get("longitude", 0))
                 }
             ),
-            categories=[cat["name"] for cat in eventbrite_event.get("categories", [])],
-            tags=[tag["name"] for tag in eventbrite_event.get("tags", [])],
             price_info=PriceInfo(
-                currency=ticket_info.get("currency", "USD"),
+                currency=currency,
                 min_price=min_price,
-                max_price=max_price,
-                price_tier=price_tier
+                max_price=max_price
             ),
-            images=[img["url"] for img in eventbrite_event.get("images", [])],
             source=SourceInfo(
                 platform="eventbrite",
-                url=eventbrite_event["url"],
+                url=event_data["url"],
                 last_updated=datetime.utcnow()
             )
         )
-
-    async def collect_events(
-        self,
-        location: Optional[str] = None,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        categories: Optional[List[str]] = None,
-        max_pages: int = 5
-    ) -> List[Event]:
-        """Collect and transform events from Eventbrite"""
-        all_events = []
-        page = 1
         
-        while page <= max_pages:
-            response_data = await self.search_events(
-                location=location,
-                start_date=start_date,
-                end_date=end_date,
-                categories=categories,
-                page=page
-            )
-            
-            events = response_data.get("events", [])
-            if not events:
-                break
-                
-            # Transform each event
-            for event_data in events:
-                try:
-                    event = self.transform_event(event_data)
-                    all_events.append(event)
-                except Exception as e:
-                    logger.error(f"Error transforming event {event_data.get('id')}: {str(e)}")
-                    continue
-            
-            # Check if there are more pages
-            pagination = response_data.get("pagination", {})
-            if not pagination.get("has_more_items", False):
-                break
-                
-            page += 1
-            
-        return all_events
+        # Store raw categories
+        raw_categories = []
+        for category in event_data.get("categories", []):
+            if isinstance(category, dict) and "name" in category:
+                raw_categories.append(category["name"])
+        event.raw_categories = raw_categories
+        
+        # Map categories to our hierarchy
+        mapped_categories = map_platform_categories("eventbrite", raw_categories, self.category_hierarchy)
+        for category in mapped_categories:
+            event.add_category(category, self.category_hierarchy)
+        
+        return event
 
     async def get_categories(self) -> List[Dict[str, str]]:
         """Get list of available Eventbrite categories"""
@@ -281,4 +100,78 @@ class EventbriteCollector:
                 return categories
         except Exception as e:
             logger.error(f"Exception in get_categories: {str(e)}")
+            return []
+
+    async def collect_events(
+        self,
+        location: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        categories: Optional[List[str]] = None
+    ) -> List[Event]:
+        """Collect events from Eventbrite"""
+        try:
+            # Map our categories to Eventbrite categories if provided
+            eventbrite_categories = []
+            if categories:
+                category_mapping = {}
+                for node in self.category_hierarchy.nodes.values():
+                    if "eventbrite" in node.platform_mappings:
+                        for eb_cat in node.platform_mappings["eventbrite"]:
+                            category_mapping[eb_cat.lower()] = node.name
+                
+                # Get available Eventbrite categories
+                available_cats = await self.get_categories()
+                available_mapping = {cat["name"].lower(): cat["id"] for cat in available_cats}
+                
+                # Map our categories to Eventbrite category IDs
+                for category in categories:
+                    if category in self.category_hierarchy.nodes:
+                        node = self.category_hierarchy.nodes[category]
+                        if "eventbrite" in node.platform_mappings:
+                            for eb_cat in node.platform_mappings["eventbrite"]:
+                                if eb_cat.lower() in available_mapping:
+                                    eventbrite_categories.append(available_mapping[eb_cat.lower()])
+            
+            # Build search parameters
+            params = {
+                "expand": "venue,ticket_classes,category",
+            }
+            
+            if location:
+                params["location.address"] = location
+            if start_date:
+                params["start_date.range_start"] = start_date.isoformat()
+            if end_date:
+                params["start_date.range_end"] = end_date.isoformat()
+            if eventbrite_categories:
+                params["categories"] = ",".join(eventbrite_categories)
+            
+            # Make API request
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/events/search/",
+                    headers=self.headers,
+                    params=params
+                )
+                
+                if response.status_code != 200:
+                    logger.error(f"Error searching events: {response.status_code} - {response.text}")
+                    return []
+                
+                data = response.json()
+                events = []
+                
+                for event_data in data.get("events", []):
+                    try:
+                        event = self._convert_to_event(event_data)
+                        events.append(event)
+                    except Exception as e:
+                        logger.error(f"Error converting event {event_data.get('id')}: {str(e)}")
+                        continue
+                
+                return events
+                
+        except Exception as e:
+            logger.error(f"Exception in collect_events: {str(e)}")
             return [] 

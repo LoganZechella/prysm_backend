@@ -1,95 +1,41 @@
 # Prysm Backend
 
-A data ingestion and processing pipeline for collecting and analyzing music industry trends using Spotify, Google Trends, and LinkedIn data.
+Event collection and processing backend for Prysm.
 
 ## Setup
 
-1. Create and activate a virtual environment:
+1. Create a virtual environment and install dependencies:
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-2. Install dependencies:
-```bash
 pip install -r requirements.txt
 ```
 
-3. Set up environment variables:
-Create a `.env` file in the root directory with the following variables:
+2. Set up environment variables in `.env`:
 ```
-# Spotify API
-SPOTIFY_CLIENT_ID=your_spotify_client_id
-SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
-
-# Google Cloud
-GOOGLE_APPLICATION_CREDENTIALS=path/to/your/credentials.json
-
-# LinkedIn API
-LINKEDIN_CLIENT_ID=your_linkedin_client_id
-LINKEDIN_CLIENT_SECRET=your_linkedin_client_secret
-
-# Airflow
-AIRFLOW_HOME=./airflow
+EVENTBRITE_API_KEY=your_key_here
+GOOGLE_MAPS_API_KEY=your_key_here  # Required for geocoding
 ```
 
-4. Initialize Airflow database:
+3. Run the development server:
 ```bash
-airflow db init
+uvicorn app.main:app --reload
 ```
 
-5. Create Airflow admin user:
-```bash
-airflow users create \
-    --username admin \
-    --firstname Admin \
-    --lastname User \
-    --role Admin \
-    --email admin@example.com
-```
+## Features
 
-## Running the Pipeline
+- Event collection from multiple sources (Eventbrite, etc.)
+- Advanced event processing:
+  - NLP-based topic extraction
+  - Sentiment analysis
+  - Location geocoding
+  - Event classification
+  - Price tier analysis
+- RESTful API for event data access
+- Google Cloud Storage integration
 
-1. Start the Airflow webserver:
-```bash
-airflow webserver -p 8080
-```
+## API Documentation
 
-2. In a new terminal, start the Airflow scheduler:
-```bash
-airflow scheduler
-```
-
-3. Access the Airflow web interface at http://localhost:8080
-
-## Project Structure
-
-```
-prysm_backend/
-├── airflow/
-│   ├── dags/           # Airflow DAG definitions
-│   ├── plugins/        # Custom Airflow plugins
-│   └── logs/          # Airflow logs
-├── tests/             # Test files
-├── utils/             # Utility functions
-├── requirements.txt   # Project dependencies
-└── README.md         # Project documentation
-```
-
-## Testing
-
-Run tests using pytest:
-```bash
-pytest tests/
-```
-
-## Contributing
-
-1. Create a new branch for your feature
-2. Make your changes
-3. Run tests
-4. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+Once the server is running, visit:
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc

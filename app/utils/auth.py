@@ -17,7 +17,7 @@ class Token(BaseModel):
 
     def dict(self, *args, **kwargs) -> Dict[str, Any]:
         """Override dict method to ensure datetime is serialized"""
-        d = super().dict(*args, **kwargs)
+        d = super().model_dump(*args, **kwargs)
         if isinstance(d.get("created_at"), datetime):
             d["created_at"] = d["created_at"].isoformat()
         return d
@@ -50,7 +50,7 @@ class TokenManager:
         try:
             logger.info(f"Storing token for {service}")
             token = Token.from_token_data(token_data)
-            self.session[f"{service}_token"] = token.dict()
+            self.session[f"{service}_token"] = token.model_dump()
             logger.info(f"Successfully stored token for {service}")
         except Exception as e:
             logger.error(f"Error storing token for {service}: {str(e)}")
