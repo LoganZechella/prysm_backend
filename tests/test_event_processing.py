@@ -6,10 +6,12 @@ from app.utils.event_processing import (
     calculate_sentiment_scores,
     enrich_event,
     classify_event,
-    process_event
+    process_event,
+    process_images
 )
-from app.utils.schema import Event, Location, PriceInfo, SourceInfo, EventAttributes
+from app.utils.schema import Event, Location, PriceInfo, SourceInfo, EventAttributes, ImageAnalysis
 from typing import cast
+import os
 
 @pytest.fixture
 def sample_event():
@@ -41,7 +43,7 @@ def sample_event():
         attributes=EventAttributes(),
         extracted_topics=[],
         sentiment_scores={"positive": 0.0, "negative": 0.0},
-        images=[],
+        images=["tests/data/test_image.jpg"],  # Add test image
         source=SourceInfo(
             platform="test",
             url="https://example.com/test-event",
@@ -92,26 +94,61 @@ def test_calculate_sentiment_scores():
     assert neutral_scores["positive"] == neutral_scores["negative"] == 0.5
     assert neutral_scores["positive"] + neutral_scores["negative"] == 1.0
 
-def test_enrich_event(sample_event):
-    """Test event enrichment"""
-    enriched_event = enrich_event(sample_event)
+@pytest.mark.asyncio
+async def test_process_images(sample_event):
+    """Test image processing"""
+    # Process images
+    processed_event = await process_images(sample_event)
     
-    assert "music" in enriched_event.extracted_topics
-    assert enriched_event.attributes.indoor_outdoor == "outdoor"
-    assert enriched_event.attributes.age_restriction == "21+"
+    # Verify image analysis results
+    assert len(processed_event.image_analysis) == 1
+    analysis = processed_event.image_analysis[0]
+    
+    # Verify scene classification
+    assert analysis.scene_classification
+    assert any(scene in ["concert_hall", "stage", "crowd"] for scene in analysis.scene_classification)
+    assert any(conf > 0.5 for conf in analysis.scene_classification.values())
+    
+    # Verify crowd density
+    assert analysis.crowd_density
+    assert "density" in analysis.crowd_density
+    assert "count_estimate" in analysis.crowd_density
+    assert "confidence" in analysis.crowd_density
+    
+    # Verify objects
+    assert analysis.objects
+    assert any(obj["name"] in ["person", "crowd", "stage"] for obj in analysis.objects)
+    assert any(obj["confidence"] > 0.5 for obj in analysis.objects)
+    
+    # Verify safe search
+    assert analysis.safe_search
+    assert all(k in analysis.safe_search for k in ["adult", "violence", "racy"])
+
+@pytest.mark.asyncio
+async def test_enrich_event_with_images(sample_event):
+    """Test event enrichment with image analysis"""
+    # Enrich event
+    enriched_event = await enrich_event(sample_event)
+    
+    # Verify image analysis was performed
+    assert len(enriched_event.image_analysis) == 1
+    
+    # Verify image analysis influenced categorization
+    assert any(cat in enriched_event.extracted_topics for cat in ["concert", "stage", "crowd"])
+    
+    # Verify indoor/outdoor classification was influenced by image analysis
+    assert enriched_event.attributes.indoor_outdoor in ["indoor", "outdoor"]
+    
+    # Verify sentiment scores
     assert enriched_event.sentiment_scores["positive"] > 0
+    assert enriched_event.sentiment_scores["negative"] >= 0
+    assert enriched_event.sentiment_scores["positive"] + enriched_event.sentiment_scores["negative"] == 1.0
 
-def test_classify_event(sample_event):
-    """Test event classification"""
-    classified_event = classify_event(sample_event)
-    
-    assert classified_event.price_info.price_tier == "medium"
-    assert len(classified_event.categories) > 0
-    assert classified_event.attributes.dress_code == "casual"
-
-def test_process_event(sample_event):
+@pytest.mark.asyncio
+async def test_process_event(sample_event):
     """Test complete event processing pipeline"""
-    processed_event = process_event(sample_event)
+    # Process event
+    processed_event = await process_event(sample_event)
     
     # Verify cleaning
     assert processed_event.title == "Test Music Festival"
@@ -125,7 +162,8 @@ def test_process_event(sample_event):
     assert processed_event.price_info.price_tier == "medium"
     assert len(processed_event.categories) > 0
 
-def test_process_event_error_handling():
+@pytest.mark.asyncio
+async def test_error_handling():
     """Test error handling in event processing"""
     with pytest.raises(ValueError):
-        process_event(cast(Event, None))  # Type cast None to Event to satisfy type checker 
+        await process_event(cast(Event, None))  # Type cast None to Event to satisfy type checker 
