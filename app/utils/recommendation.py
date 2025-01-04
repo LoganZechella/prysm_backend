@@ -225,6 +225,11 @@ class RecommendationEngine:
             similarities = []
             for candidate in candidates:
                 if candidate.event_id != event.event_id:
+                    # Check for category overlap first
+                    common_categories = set(event.categories) & set(candidate.categories)
+                    if not common_categories:
+                        continue
+                        
                     similarity = self.calculate_event_similarity(event, candidate)
                     similarities.append((candidate, similarity))
             
@@ -269,11 +274,11 @@ class RecommendationEngine:
                 'time': 0.2
             }
             
-            # Category match
+            # Category match - give points for any matching category
             event_cats = set(event.categories)
             pref_cats = set(preferences.preferred_categories)
             cat_overlap = len(event_cats.intersection(pref_cats))
-            cat_score = cat_overlap / len(pref_cats) if pref_cats else 0.5
+            cat_score = min(1.0, cat_overlap / max(1, min(len(event_cats), len(pref_cats))))
             
             # Price match
             price_match = event.price_info.price_tier in preferences.price_preferences
