@@ -1,80 +1,117 @@
-# Prysm Backend
+# Event Recommendation System
 
-Event collection and processing backend for Prysm.
+A FastAPI-based backend service that provides personalized event recommendations based on user preferences and event data.
 
-## Setup
+## Features
 
-1. Create a virtual environment and install dependencies:
+- Personalized event recommendations based on:
+  - User preferences (categories, location, price range, etc.)
+  - Event attributes (indoor/outdoor, accessibility, age restrictions)
+  - Time and date preferences
+  - Location proximity
+- Caching system for improved performance
+- JWT-based authentication
+- RESTful API endpoints
+- Comprehensive test coverage
 
+## Tech Stack
+
+- FastAPI: Modern, fast web framework for building APIs
+- Pydantic: Data validation using Python type annotations
+- Redis: Caching layer for improved performance
+- PostgreSQL: Primary database (through SQLAlchemy)
+- JWT: Token-based authentication
+- pytest: Testing framework
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.9+
+- Redis server
+- PostgreSQL database
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/event-recommendation-system.git
+cd event-recommendation-system
+```
+
+2. Create and activate a virtual environment:
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install dependencies:
+```bash
 pip install -r requirements.txt
 ```
 
-2. Set up environment variables in `.env`:
-
-```
-EVENTBRITE_API_KEY=your_key_here
-META_ACCESS_TOKEN=your_token_here
-GOOGLE_MAPS_API_KEY=your_key_here  # Required for geocoding
-GOOGLE_CLOUD_PROJECT=your_project_id  # Required for Google Cloud services
-GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account.json  # Required for Google Cloud services
-GCS_RAW_BUCKET=prysm-raw-data  # Google Cloud Storage bucket for raw data
-GCS_PROCESSED_BUCKET=prysm-processed-data  # Google Cloud Storage bucket for processed data
+4. Set up environment variables:
+```bash
+cp .env.example .env
+# Edit .env with your configuration
 ```
 
-3. Set up Google Cloud services:
-   - Create a Google Cloud project
-   - Enable the following APIs:
-     - Google Cloud Storage
-     - Google Cloud Vision API
-   - Create a service account with access to these services
-   - Download the service account key JSON file
-
-4. Run the development server:
-
+5. Run the application:
 ```bash
 uvicorn app.main:app --reload
 ```
 
-## Features
+The API will be available at `http://localhost:8000`
 
-- Event collection from multiple sources (Meta, Eventbrite, etc.)
-- Advanced event processing:
-  - NLP-based topic extraction
-  - Sentiment analysis
-  - Location geocoding
-  - Event classification
-  - Price tier analysis
-  - Image processing and analysis:
-    - Scene classification
-    - Crowd density estimation
-    - Object detection
-    - Safe search analysis
-- RESTful API for event data access
-- Google Cloud Storage integration
+### Running Tests
 
-## Image Processing
-
-The system includes advanced image processing capabilities powered by machine learning:
-
-- **Scene Classification**: Identifies the type of venue or setting (e.g., concert hall, stadium, conference room)
-- **Crowd Density**: Estimates crowd size and density for better capacity planning
-- **Object Detection**: Identifies relevant objects and features in event images
-- **Safe Search**: Ensures image content is appropriate and safe
-
-Images are processed using:
-
-- ResNet-50 for scene classification
-- Google Cloud Vision API for object detection and safe search
-- Custom crowd density estimation
-
-Processed images and their analysis results are stored in Google Cloud Storage for efficient access.
+```bash
+pytest
+```
 
 ## API Documentation
 
-Once the server is running, visit:
+Once the server is running, you can access the API documentation at:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
 
-- Swagger UI: <http://localhost:8000/docs>
-- ReDoc: <http://localhost:8000/redoc>
+### Main Endpoints
+
+- `GET /api/recommendations`: Get personalized event recommendations
+- `GET /api/health`: Health check endpoint
+
+## Project Structure
+
+```
+app/
+├── api/                 # API routes
+│   ├── __init__.py
+│   └── recommendations.py
+├── schemas/            # Pydantic models
+│   ├── __init__.py
+│   ├── event.py
+│   └── user.py
+├── services/          # Business logic
+│   ├── __init__.py
+│   └── recommendation.py
+├── auth.py           # Authentication
+├── storage.py        # Data storage
+└── main.py          # Application entry point
+
+tests/               # Test files
+├── __init__.py
+├── conftest.py
+└── test_recommendations.py
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.

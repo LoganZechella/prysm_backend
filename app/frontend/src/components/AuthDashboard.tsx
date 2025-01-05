@@ -12,12 +12,8 @@ import {
 } from '@chakra-ui/react'
 import { FaSpotify, FaGoogle, FaLinkedin } from 'react-icons/fa'
 import { useNavigate } from 'react-router-dom'
-import axios from 'axios'
-import Session from 'supertokens-auth-react/recipe/session'
-
-// Configure axios defaults
-axios.defaults.withCredentials = true
-axios.defaults.headers.common['Content-Type'] = 'application/json'
+import { AxiosError } from 'axios'
+import api from '../utils/api'
 
 interface AuthStatus {
   spotify: boolean
@@ -43,7 +39,7 @@ const AuthDashboard = () => {
 
     if (error) {
       toast({
-        title: 'Authentication Error',
+        title: 'Connection Error',
         description: error.replace(/_/g, ' '),
         status: 'error',
         duration: 5000,
@@ -53,36 +49,35 @@ const AuthDashboard = () => {
       navigate('/auth/dashboard', { replace: true })
     } else if (success) {
       toast({
-        title: 'Authentication Successful',
+        title: 'Service Connected Successfully',
         status: 'success',
         duration: 3000,
         isClosable: true,
       })
       // Clear the success from URL
       navigate('/auth/dashboard', { replace: true })
+      // Trigger an immediate status check
+      checkAuthStatus()
     }
   }, [navigate, toast])
 
   const checkAuthStatus = async () => {
     try {
-      const response = await axios.get('/api/auth/status', {
-        withCredentials: true,
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        }
-      })
+      const response = await api.get('/auth/status')
       setAuthStatus(response.data)
       setIsLoading(false)
     } catch (error) {
       console.error('Error checking auth status:', error)
-      toast({
-        title: 'Error checking auth status',
-        description: error instanceof Error ? error.message : 'Unknown error',
-        status: 'error',
-        duration: 3000,
-        isClosable: true,
-      })
+      const axiosError = error as AxiosError
+      if (axiosError.response?.status !== 401) {  // Don't show toast for auth errors
+        toast({
+          title: 'Error checking auth status',
+          description: axiosError.message || 'Unknown error',
+          status: 'error',
+          duration: 3000,
+          isClosable: true,
+        })
+      }
       setIsLoading(false)
     }
   }
@@ -90,17 +85,9 @@ const AuthDashboard = () => {
   useEffect(() => {
     const initSession = async () => {
       try {
-        // Check if we have a session
-        const session = await Session.doesSessionExist()
-        if (!session) {
-          // Create a new session with a temporary user ID
-          await axios.get('/api/auth/init-session', {
-            withCredentials: true,
-            headers: {
-              'Accept': 'application/json',
-              'Content-Type': 'application/json',
-            }
-          })
+        const response = await api.get('/auth/init-session')
+        if (response.data.token) {
+          localStorage.setItem('auth_token', response.data.token)
         }
       } catch (error) {
         console.error('Error initializing session:', error)
@@ -116,30 +103,45 @@ const AuthDashboard = () => {
 
   const handleLogin = async (service: string) => {
     try {
-      const response = await axios.get(`/api/auth/${service}`)
+      // Get current token from localStorage
+      const token = localStorage.getItem('auth_token');
+      if (!token) {
+        toast({
+          title: `Error connecting to ${service}`,
+          description: 'Please refresh the page and try again',
+          status: 'error',
+          duration: 3000,
+          isClosable: true,
+        });
+        return;
+      }
+
+      // Set up request with Authorization header
+      const response = await api.get(`/auth/${service}`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
       if (response.data.auth_url) {
-        window.location.href = response.data.auth_url
+        window.location.href = response.data.auth_url;
       }
     } catch (error) {
-      console.error(`Error initiating ${service} login:`, error)
+      console.error(`Error initiating ${service} login:`, error);
       toast({
         title: `Error connecting to ${service}`,
         description: error instanceof Error ? error.message : 'Unknown error',
         status: 'error',
         duration: 3000,
         isClosable: true,
-      })
+      });
     }
-  }
+  };
 
   const handleLogout = async () => {
     try {
-      await axios.post('/api/auth/logout', {}, {
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        }
-      })
+      await api.post('/auth/logout')
+      localStorage.removeItem('auth_token')
       await checkAuthStatus()
       toast({
         title: 'Logged out successfully',

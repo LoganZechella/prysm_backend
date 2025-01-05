@@ -1,166 +1,157 @@
 import pytest
 from datetime import datetime, timedelta
-from app.utils.schema import Event, Location, PriceInfo, EventAttributes, SourceInfo, EventMetadata
-from app.utils.data_quality import DataQualityService, DataQualityMetrics, DataProfile
+from app.services.data_quality import (
+    validate_event,
+    check_required_fields,
+    validate_coordinates,
+    validate_dates,
+    validate_prices
+)
+from app.schemas.event import Event, Location, PriceInfo, SourceInfo, EventAttributes, EventMetadata
 
-@pytest.fixture
-def sample_events():
-    """Create sample events for testing"""
-    base_time = datetime.now() + timedelta(days=1)
-    events = []
-    
-    # Valid event
-    events.append(Event(
-        event_id="event1",
-        title="Test Event 1",
-        description="This is a test event with proper description that meets the minimum length requirement.",
-        start_datetime=base_time,
-        end_datetime=base_time + timedelta(hours=2),
-        location=Location(
-            venue_name="Test Venue",
-            city="Test City",
-            coordinates={"lat": 37.7749, "lng": -122.4194}
-        ),
-        categories=["music", "concert"],
-        price_info=PriceInfo(min_price=50.0, max_price=100.0),
-        source=SourceInfo(
-            platform="test",
-            url="http://test.com",
-            last_updated=datetime.now()
-        ),
-        metadata=EventMetadata(popularity_score=0.8)
-    ))
-    
-    # Event with validation issues
-    events.append(Event(
-        event_id="event2",
-        title="123 Invalid Title",
-        description="Too short",
-        start_datetime=base_time - timedelta(days=2),  # Past event
-        location=Location(
-            venue_name="",  # Empty venue
-            city="Test City",
-            coordinates={"lat": 100.0, "lng": -200.0}  # Invalid coordinates
-        ),
-        categories=[],  # Empty categories
-        price_info=PriceInfo(min_price=100.0, max_price=50.0),  # Invalid price range
-        source=SourceInfo(
-            platform="test",
-            url="http://test.com",
-            last_updated=datetime.now()
-        ),
-        metadata=EventMetadata(popularity_score=0.5)
-    ))
-    
-    # Event with anomalies
-    events.append(Event(
-        event_id="event3",
-        title="Anomalous Event",
-        description="This event has unusual characteristics that should be detected as anomalies.",
-        start_datetime=base_time,
-        end_datetime=base_time + timedelta(days=10),  # Unusually long duration
-        location=Location(
-            venue_name="Test Venue",
-            city="Test City",
-            coordinates={"lat": 37.7749, "lng": -122.4194}
-        ),
-        categories=["cat1", "cat2", "cat3", "cat4", "cat5", "cat6", "cat7", "cat8", "cat9", "cat10", "cat11"],
-        price_info=PriceInfo(min_price=1000.0, max_price=5000.0),  # Unusually high price
-        source=SourceInfo(
-            platform="test",
-            url="http://test.com",
-            last_updated=datetime.now()
-        ),
-        metadata=EventMetadata(popularity_score=0.9)
-    ))
-    
-    return events
-
-def test_validate_event(sample_events):
-    """Test event validation"""
-    service = DataQualityService()
-    
+def test_validate_event():
+    """Test event validation."""
+    now = datetime.now()
     # Test valid event
-    is_valid, errors = service.validate_event(sample_events[0])
-    assert is_valid
-    assert not errors
+    event = Event(
+        event_id="1",
+        title="Test Event",
+        description="A test event",
+        start_datetime=now,
+        location=Location(
+            venue_name="Test Venue",
+            city="Test City",
+            coordinates={"lat": 37.7749, "lon": -122.4194}
+        ),
+        categories=["test"],
+        attributes=EventAttributes(
+            indoor_outdoor="indoor",
+            age_restriction="all"
+        ),
+        source=SourceInfo(
+            platform="test",
+            url="http://test.com",
+            last_updated=now
+        ),
+        metadata=EventMetadata(
+            popularity_score=0.8
+        )
+    )
     
-    # Test invalid event
-    is_valid, errors = service.validate_event(sample_events[1])
-    assert not is_valid
-    assert len(errors) >= 5  # Should have multiple validation errors
-    assert any("Title" in error for error in errors)
-    assert any("venue" in error for error in errors)
-    assert any("coordinates" in error for error in errors)
-    assert any("categories" in error for error in errors)
-    assert any("price" in error for error in errors)
+    assert validate_event(event) is True
+    
+    # Test invalid coordinates
+    event.location.coordinates = {"lat": 100.0, "lon": 200.0}
+    assert validate_event(event) is False
+    
+    # Test invalid dates
+    event.end_datetime = now - timedelta(days=1)  # End before start
+    assert validate_event(event) is False
+    
+    # Test invalid prices
+    event.price_info = PriceInfo(
+        min_price=-10.0,  # Negative price
+        max_price=50.0,
+        currency="USD",
+        price_tier="medium"
+    )
+    assert validate_event(event) is False
 
-def test_profile_events(sample_events):
-    """Test event data profiling"""
-    service = DataQualityService()
-    profile = service.profile_events(sample_events)
+def test_check_required_fields():
+    """Test required field validation."""
+    now = datetime.now()
+    event = Event(
+        event_id="1",
+        title="Test Event",
+        description="A test event",
+        start_datetime=now,
+        location=Location(
+            venue_name="Test Venue",
+            city="Test City",
+            coordinates={"lat": 37.7749, "lon": -122.4194}
+        ),
+        categories=["test"],
+        attributes=EventAttributes(
+            indoor_outdoor="indoor",
+            age_restriction="all"
+        ),
+        source=SourceInfo(
+            platform="test",
+            url="http://test.com",
+            last_updated=now
+        ),
+        metadata=EventMetadata(
+            popularity_score=0.8
+        )
+    )
     
-    # Check field types
-    assert "title" in profile.field_types
-    assert "description" in profile.field_types
+    assert check_required_fields(event) is True
     
-    # Check unique values
-    assert profile.unique_values["title"] == 3
+    # Test missing title
+    event.title = ""
+    assert check_required_fields(event) is False
     
-    # Check value distributions
-    assert "categories" in profile.value_distributions
-    
-    # Check numeric stats
-    assert "popularity_score" in profile.numeric_stats
-    stats = profile.numeric_stats["popularity_score"]
-    assert all(key in stats for key in ["mean", "std", "min", "max", "median"])
+    # Test missing description
+    event.description = ""
+    assert check_required_fields(event) is False
 
-def test_calculate_completeness(sample_events):
-    """Test completeness calculation"""
-    service = DataQualityService()
-    completeness = service.calculate_completeness(sample_events)
+def test_validate_coordinates():
+    """Test coordinate validation."""
+    # Test valid coordinates
+    assert validate_coordinates({"lat": 37.7749, "lon": -122.4194}) is True
     
-    # All required fields should be present
-    assert "title" in completeness
-    assert "description" in completeness
-    assert "start_datetime" in completeness
+    # Test invalid latitude
+    assert validate_coordinates({"lat": 100.0, "lon": -122.4194}) is False
     
-    # Check completeness scores
-    assert all(0 <= score <= 100 for score in completeness.values())
-    assert completeness["title"] == 100  # All events have titles
+    # Test invalid longitude
+    assert validate_coordinates({"lat": 37.7749, "lon": 200.0}) is False
+    
+    # Test missing coordinates
+    assert validate_coordinates({}) is False
 
-def test_detect_anomalies(sample_events):
-    """Test anomaly detection"""
-    service = DataQualityService()
-    anomalies = service.detect_anomalies(sample_events)
+def test_validate_dates():
+    """Test date validation."""
+    now = datetime.now()
     
-    # Check anomalous event
-    assert "event3" in anomalies
-    event3_anomalies = anomalies["event3"]
-    assert any("price" in anomaly.lower() for anomaly in event3_anomalies)
-    assert any("duration" in anomaly.lower() for anomaly in event3_anomalies)
-    assert any("categories" in anomaly.lower() for anomaly in event3_anomalies)
+    # Test valid dates
+    assert validate_dates(now, now + timedelta(hours=1)) is True
     
-    # Check normal event
-    assert "event1" not in anomalies
+    # Test end before start
+    assert validate_dates(now, now - timedelta(hours=1)) is False
+    
+    # Test missing end date
+    assert validate_dates(now, None) is True
 
-def test_generate_quality_report(sample_events):
-    """Test quality report generation"""
-    service = DataQualityService()
-    report = service.generate_quality_report(sample_events)
+def test_validate_prices():
+    """Test price validation."""
+    # Test valid prices
+    assert validate_prices(PriceInfo(
+        min_price=10.0,
+        max_price=50.0,
+        currency="USD",
+        price_tier="medium"
+    )) is True
     
-    # Check report structure
-    assert "metrics" in report
-    assert "profile" in report
-    assert "completeness" in report
-    assert "anomalies" in report
-    assert "quality_score" in report
-    assert "timestamp" in report
+    # Test negative price
+    assert validate_prices(PriceInfo(
+        min_price=-10.0,
+        max_price=50.0,
+        currency="USD",
+        price_tier="medium"
+    )) is False
     
-    # Check quality scores
-    quality_score = report["quality_score"]
-    assert all(0 <= score <= 100 for score in quality_score.values())
-    assert "validity" in quality_score
-    assert "completeness" in quality_score
-    assert "anomaly_free" in quality_score
-    assert "overall" in quality_score 
+    # Test min > max
+    assert validate_prices(PriceInfo(
+        min_price=60.0,
+        max_price=50.0,
+        currency="USD",
+        price_tier="medium"
+    )) is False
+    
+    # Test invalid currency
+    assert validate_prices(PriceInfo(
+        min_price=10.0,
+        max_price=50.0,
+        currency="INVALID",
+        price_tier="medium"
+    )) is False 
