@@ -3,8 +3,8 @@ import logging
 from typing import Dict, List, Any, Optional, cast
 from datetime import datetime, timedelta
 import httpx
-from app.utils.schema import Event, Location, PriceInfo, SourceInfo
-from app.utils.category_hierarchy import create_default_hierarchy, map_platform_categories
+from app.schemas.event import Event, Location, PriceInfo, SourceInfo, EventAttributes, EventMetadata
+from app.services.category_hierarchy import create_default_hierarchy, map_platform_categories
 
 logger = logging.getLogger(__name__)
 
@@ -24,21 +24,18 @@ class MetaCollector:
         
         # Extract price information
         ticket_info = event_data.get("ticket_uri", {})
-        price_info = PriceInfo()  # Default price info
+        min_price = 0.0
+        max_price = 0.0
         
         if "ticket_info" in event_data:
-            price_info = PriceInfo(
-                currency=event_data["ticket_info"].get("currency", "USD"),
-                min_price=float(event_data["ticket_info"].get("min_price", 0)),
-                max_price=float(event_data["ticket_info"].get("max_price", 0))
-            )
+            min_price = float(event_data["ticket_info"].get("min_price", 0))
+            max_price = float(event_data["ticket_info"].get("max_price", 0))
         
         # Create Event object
         event = Event(
             event_id=event_data["id"],
             title=event_data["name"],
             description=event_data.get("description", ""),
-            short_description=event_data.get("description", "")[:200] + "..." if len(event_data.get("description", "")) > 200 else event_data.get("description", ""),
             start_datetime=datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00")),
             end_datetime=datetime.fromisoformat(event_data["end_time"].replace("Z", "+00:00")) if "end_time" in event_data else None,
             location=Location(
@@ -52,11 +49,26 @@ class MetaCollector:
                     "lng": float(location.get("longitude", 0))
                 }
             ),
-            price_info=price_info,
+            categories=[],  # Will be populated later
+            price_info=PriceInfo(
+                currency=event_data.get("ticket_info", {}).get("currency", "USD"),
+                min_price=min_price,
+                max_price=max_price,
+                price_tier="low" if min_price == 0 else "medium"  # Default tier, can be refined
+            ),
+            attributes=EventAttributes(
+                indoor_outdoor="indoor",  # Default value
+                age_restriction="all",    # Default value
+                accessibility_features=[]
+            ),
             source=SourceInfo(
                 platform="meta",
                 url=event_data.get("event_url", ""),
                 last_updated=datetime.utcnow()
+            ),
+            metadata=EventMetadata(
+                popularity_score=0.5,  # Default value
+                tags=[]
             )
         )
         
@@ -66,12 +78,10 @@ class MetaCollector:
             raw_categories.append(event_data["category"])
         if "event_type" in event_data:
             raw_categories.append(event_data["event_type"])
-        event.raw_categories = raw_categories
         
         # Map categories to our hierarchy
         mapped_categories = map_platform_categories("meta", raw_categories, self.category_hierarchy)
-        for category in mapped_categories:
-            event.add_category(category, self.category_hierarchy)
+        event.categories = list(mapped_categories)  # Convert set to list
         
         return event
 

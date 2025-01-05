@@ -171,4 +171,4 @@ def test_session_management(client, mock_supertokens):
     # Test session already exists
     response = client.get("/api/auth/init-session")
     assert response.status_code == 200
-    assert response.json()["message"] == "Session already exists" 
+    assert response.json()["message"] == "Session already exists"  # type: ignore

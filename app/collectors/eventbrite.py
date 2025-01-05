@@ -3,9 +3,9 @@ import httpx
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 import logging
-from app.utils.schema import Event, Location, PriceInfo, SourceInfo
+from app.schemas.event import Event, Location, PriceInfo, SourceInfo, EventAttributes, EventMetadata
 import json
-from app.utils.category_hierarchy import create_default_hierarchy, map_platform_categories
+from app.services.category_hierarchy import create_default_hierarchy, map_platform_categories
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,6 @@ class EventbriteCollector:
             event_id=event_data["id"],
             title=event_data["name"]["text"],
             description=event_data["description"]["text"],
-            short_description=event_data["description"]["text"][:200] + "..." if len(event_data["description"]["text"]) > 200 else event_data["description"]["text"],
             start_datetime=datetime.fromisoformat(event_data["start"]["utc"].replace("Z", "+00:00")),
             end_datetime=datetime.fromisoformat(event_data["end"]["utc"].replace("Z", "+00:00")),
             location=Location(
@@ -52,15 +51,26 @@ class EventbriteCollector:
                     "lng": float(venue.get("longitude", 0))
                 }
             ),
+            categories=[],  # Will be populated later
             price_info=PriceInfo(
                 currency=currency,
                 min_price=min_price,
-                max_price=max_price
+                max_price=max_price,
+                price_tier="low" if min_price == 0 else "medium"  # Default tier, can be refined
+            ),
+            attributes=EventAttributes(
+                indoor_outdoor="indoor",  # Default value
+                age_restriction="all",    # Default value
+                accessibility_features=[]
             ),
             source=SourceInfo(
                 platform="eventbrite",
                 url=event_data["url"],
                 last_updated=datetime.utcnow()
+            ),
+            metadata=EventMetadata(
+                popularity_score=0.5,  # Default value
+                tags=[]
             )
         )
         
@@ -69,12 +79,10 @@ class EventbriteCollector:
         for category in event_data.get("categories", []):
             if isinstance(category, dict) and "name" in category:
                 raw_categories.append(category["name"])
-        event.raw_categories = raw_categories
         
         # Map categories to our hierarchy
         mapped_categories = map_platform_categories("eventbrite", raw_categories, self.category_hierarchy)
-        for category in mapped_categories:
-            event.add_category(category, self.category_hierarchy)
+        event.categories = list(mapped_categories)  # Convert set to list
         
         return event
 

@@ -3,8 +3,8 @@ import logging
 from typing import Dict, List, Any, Optional, AsyncGenerator, Union
 from datetime import datetime, timedelta
 from scrapfly import ScrapflyClient, ScrapeConfig, ScrapeApiResponse
-from app.utils.storage import StorageManager
-from app.utils.schema import Event, Location, PriceInfo, SourceInfo
+from app.storage import StorageManager
+from app.schemas.event import Event, Location, PriceInfo, SourceInfo, EventAttributes, EventMetadata
 from bs4 import BeautifulSoup
 import json
 import re
@@ -69,8 +69,14 @@ class EventScraper:
         try:
             # Get HTML content from Scrapfly response
             html_content = result.content if isinstance(result, ScrapeApiResponse) else result.get('content', '')
+            
             # Get URL from the response
-            result_url = result.context['url'] if isinstance(result, ScrapeApiResponse) else result.get('url', '')
+            result_url = ''
+            if isinstance(result, ScrapeApiResponse):
+                if hasattr(result, 'context') and result.context is not None:
+                    result_url = result.context.get('url', '')
+            else:
+                result_url = result.get('url', '')
             
             # Log the HTML content for debugging
             logger.debug(f"HTML content length: {len(html_content)}")
@@ -135,7 +141,6 @@ class EventScraper:
                         event_id=f"eventbrite_{hash(title + str(start_datetime))}",
                         title=title,
                         description=description,
-                        short_description=short_description,
                         start_datetime=start_datetime,
                         end_datetime=start_datetime + timedelta(hours=3),  # Default duration
                         location=Location(
@@ -146,19 +151,26 @@ class EventScraper:
                             country=country,
                             coordinates={"lat": 0.0, "lng": 0.0}  # Default coordinates
                         ),
-                        categories=[],  # TODO: Extract categories
-                        tags=[],
+                        categories=[],  # Will be populated later
                         price_info=PriceInfo(
                             currency="USD",
                             min_price=min_price,
                             max_price=max_price,
                             price_tier=price_tier
                         ),
-                        images=images,
+                        attributes=EventAttributes(
+                            indoor_outdoor="indoor",  # Default value
+                            age_restriction="all",    # Default value
+                            accessibility_features=[]
+                        ),
                         source=SourceInfo(
                             platform="eventbrite",
                             url=event_url,
                             last_updated=datetime.utcnow()
+                        ),
+                        metadata=EventMetadata(
+                            popularity_score=0.5,  # Default value
+                            tags=[]
                         )
                     )
                     
