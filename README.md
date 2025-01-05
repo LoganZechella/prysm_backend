@@ -5,6 +5,7 @@ Event collection and processing backend for Prysm.
 ## Setup
 
 1. Create a virtual environment and install dependencies:
+
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
@@ -12,6 +13,7 @@ pip install -r requirements.txt
 ```
 
 2. Set up environment variables in `.env`:
+
 ```
 EVENTBRITE_API_KEY=your_key_here
 META_ACCESS_TOKEN=your_token_here
@@ -31,6 +33,7 @@ GCS_PROCESSED_BUCKET=prysm-processed-data  # Google Cloud Storage bucket for pro
    - Download the service account key JSON file
 
 4. Run the development server:
+
 ```bash
 uvicorn app.main:app --reload
 ```
@@ -62,6 +65,7 @@ The system includes advanced image processing capabilities powered by machine le
 - **Safe Search**: Ensures image content is appropriate and safe
 
 Images are processed using:
+
 - ResNet-50 for scene classification
 - Google Cloud Vision API for object detection and safe search
 - Custom crowd density estimation
@@ -71,5 +75,6 @@ Processed images and their analysis results are stored in Google Cloud Storage f
 ## API Documentation
 
 Once the server is running, visit:
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+
+- Swagger UI: <http://localhost:8000/docs>
+- ReDoc: <http://localhost:8000/redoc>

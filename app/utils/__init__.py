@@ -23,4 +23,4 @@ __all__ = [
     'SourceInfo',
     'ImageAnalysis',
     'UserPreferences'
-] 
+]

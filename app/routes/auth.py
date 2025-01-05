@@ -13,6 +13,7 @@ import spotipy
 from fastapi.responses import RedirectResponse
 from supertokens_python.recipe.session.asyncio import revoke_session
 import httpx
+import traceback
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -228,14 +229,31 @@ async def spotify_callback_handler(
 async def logout_handler(request: Request):
     """Handle user logout by revoking the session."""
     try:
-        session = await verify_session(request)
-        await revoke_session(session.get_handle())
-        return {"status": "success", "message": "Logged out successfully"}
+        logger.debug("Starting logout process")
+        try:
+            session = await verify_session(request)
+            session_handle = session.get_handle()
+            logger.debug(f"Found active session with handle: {session_handle}")
+            
+            await revoke_session(session_handle)
+            logger.debug("Successfully revoked session")
+            
+            return {"status": "success", "message": "Logged out successfully"}
+            
+        except Exception as session_error:
+            logger.error(f"Session error during logout: {str(session_error)}")
+            logger.error(f"Session error traceback: {traceback.format_exc()}")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired session"
+            )
+            
     except Exception as e:
-        logger.error(f"Error during logout: {str(e)}", exc_info=True)
+        logger.error(f"Error during logout: {str(e)}")
+        logger.error(f"Logout error traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=500,
-            detail="Failed to logout"
+            detail=f"Failed to logout: {str(e)}"
         ) 
 
 @router.get("/google")

@@ -111,47 +111,116 @@ def clean_event_data(event: Event) -> Event:
 
 def extract_topics(text: str) -> List[str]:
     """Extract topics from event text using spaCy NLP"""
-    # Use new category extraction
+    # Process text with spaCy
+    doc = nlp(text.lower())
+    
+    # Extract topics using NER and noun chunks
+    topics = set()
+    
+    # Add named entities
+    for ent in doc.ents:
+        if ent.label_ in ["ORG", "PRODUCT", "EVENT", "WORK_OF_ART"]:
+            topics.add(ent.text)
+    
+    # Add noun chunks
+    for chunk in doc.noun_chunks:
+        topics.add(chunk.root.text)
+    
+    # Define topic mappings
+    topic_mappings = {
+        "tech": "technology",
+        "ai": "artificial intelligence",
+        "ml": "machine learning",
+        "ds": "data science"
+    }
+    
+    # Add technology-related keywords
+    tech_keywords = {
+        "technology", "workshop", "coding", "programming",
+        "software", "hardware", "digital", "computer", "ai",
+        "artificial intelligence", "machine learning", "data science"
+    }
+    
+    # Check for tech-related words and apply mappings
+    text_words = set(text.lower().split())
+    for word in text_words:
+        if word in topic_mappings:
+            topics.add(topic_mappings[word])
+        if word in tech_keywords:
+            topics.add(word)
+    
+    # Use category extraction for additional topics
     categories = extract_categories(text, category_hierarchy)
-    return list(categories)
+    topics.update(categories)
+    
+    return list(topics)
 
 def calculate_sentiment_scores(text: str) -> Dict[str, float]:
-    """Calculate sentiment scores for text"""
+    """Calculate sentiment scores for text with improved chunk processing and error handling"""
+    if not text or not text.strip():
+        logger.warning("Empty text provided for sentiment analysis")
+        return {'positive': 0.5, 'negative': 0.5}
+    
     try:
+        # Clean and normalize text
+        text = ' '.join(text.split())  # Normalize whitespace
+        
         # Split text into chunks if it's too long (model max length is typically 512 tokens)
-        max_chunk_length = 450  # Leave some room for special tokens
+        max_chunk_length = 450  # Leave room for special tokens
         chunks = [text[i:i + max_chunk_length] for i in range(0, len(text), max_chunk_length)]
         
         # Get sentiment for each chunk
-        sentiments = []
-        for chunk in chunks:
-            if chunk.strip():  # Only process non-empty chunks
-                result = sentiment_analyzer(chunk)[0] # type: ignore
-                sentiments.append(result)
+        chunk_sentiments = []
+        for i, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
+                
+            try:
+                result = sentiment_analyzer(chunk)
+                if not result or not isinstance(result, list) or not result[0]:
+                    continue
+                    
+                sentiment = result[0]
+                if not isinstance(sentiment, dict) or 'score' not in sentiment or 'label' not in sentiment:
+                    continue
+                    
+                chunk_sentiments.append({
+                    'score': float(sentiment['score']),
+                    'label': str(sentiment['label']),
+                    'weight': len(chunk) / len(text)  # Weight by chunk length
+                })
+            except Exception as e:
+                logger.error(f"Error analyzing chunk {i}: {str(e)}")
+                continue
         
-        if not sentiments:
+        if not chunk_sentiments:
+            logger.warning("No valid sentiment results obtained")
             return {'positive': 0.5, 'negative': 0.5}
         
-        # Calculate average sentiment
-        positive_score = sum(
-            s['score'] for s in sentiments if s['label'] == 'POSITIVE'
-        ) / len(sentiments)
-        negative_score = sum(
-            s['score'] for s in sentiments if s['label'] == 'NEGATIVE'
-        ) / len(sentiments)
+        # Calculate weighted average sentiment
+        total_positive = 0.0
+        total_weight = 0.0
         
-        # Normalize scores to sum to 1.0
-        total = positive_score + negative_score
-        if total == 0:
+        for sentiment in chunk_sentiments:
+            weight = sentiment['weight']
+            if sentiment['label'] == 'POSITIVE':
+                total_positive += sentiment['score'] * weight
+            total_weight += weight
+        
+        if total_weight == 0:
             return {'positive': 0.5, 'negative': 0.5}
-            
+        
+        # Calculate final scores
+        positive_score = total_positive / total_weight
+        
+        # Round to 3 decimal places
         return {
-            'positive': round(positive_score / total, 3),
-            'negative': round(negative_score / total, 3)
+            'positive': round(positive_score, 3),
+            'negative': round(1 - positive_score, 3)
         }
         
     except Exception as e:
-        logger.error(f"Error calculating sentiment scores: {str(e)}")
+        logger.error(f"Error in sentiment analysis: {str(e)}")
         return {'positive': 0.5, 'negative': 0.5}
 
 async def enrich_event(event: Event) -> Event:
@@ -228,11 +297,16 @@ async def enrich_event(event: Event) -> Event:
     
     # Extract age restrictions
     age_patterns = [
-        (r'\b21\+\b|\b21\s*and\s*over\b|\btwenty-one\s*and\s*over\b', '21+'),
+        (r'\b21\+\b|\b21\s*and\s*over\b|\btwenty-one\s*and\s*over\b|\b21\s*only\b', '21+'),
         (r'\b18\+\b|\b18\s*and\s*over\b|\beighteen\s*and\s*over\b', '18+'),
         (r'\ball\s*ages\b|\bfamily\s*friendly\b', 'all')
     ]
     
+    # Default to 'all' unless a restriction is found
+    event.attributes.age_restriction = 'all'
+    
+    # Check for age restrictions in both title and description
+    text = f"{event.title} {event.description}".lower()
     for pattern, restriction in age_patterns:
         if re.search(pattern, text, re.IGNORECASE):
             event.attributes.age_restriction = restriction
@@ -254,24 +328,57 @@ async def enrich_event(event: Event) -> Event:
     return event
 
 def classify_event(event: Event) -> Event:
-    """Classify event based on various attributes"""
-    # Classify price tier
-    avg_price = (event.price_info.min_price + event.price_info.max_price) / 2
-    
-    if event.price_info.min_price == 0:
+    """Classify event based on various attributes including price tier, venue type, and target audience"""
+    # Normalize and classify price tier based on event type and location
+    if event.price_info.min_price == 0 and event.price_info.max_price == 0:
         event.price_info.price_tier = 'free'
-    elif avg_price < 20:
-        event.price_info.price_tier = 'budget'
-    elif avg_price < 50:
-        event.price_info.price_tier = 'medium'
     else:
-        event.price_info.price_tier = 'premium'
+        # Calculate average price
+        avg_price = (event.price_info.min_price + event.price_info.max_price) / 2
+        
+        # Adjust price thresholds based on event category
+        price_thresholds = {
+            'concert': {'budget': 30, 'medium': 75},
+            'conference': {'budget': 100, 'medium': 500},
+            'workshop': {'budget': 50, 'medium': 200},
+            'sports': {'budget': 40, 'medium': 100},
+            'theater': {'budget': 35, 'medium': 80},
+            'default': {'budget': 25, 'medium': 75}
+        }
+        
+        # Determine event type from categories
+        event_type = 'default'
+        for category in event.categories:
+            if category.lower() in price_thresholds:
+                event_type = category.lower()
+                break
+        
+        thresholds = price_thresholds[event_type]
+        
+        # Apply location-based adjustment
+        major_cities = {'new york', 'san francisco', 'los angeles', 'chicago', 'miami', 'boston'}
+        if event.location.city.lower() in major_cities:
+            thresholds = {k: v * 1.5 for k, v in thresholds.items()}
+        
+        # Classify price tier
+        if avg_price <= thresholds['budget']:
+            event.price_info.price_tier = 'budget'
+        elif avg_price <= thresholds['medium']:
+            event.price_info.price_tier = 'medium'
+        else:
+            event.price_info.price_tier = 'premium'
     
-    # Extract dress code using NLP
-    text = event.description.lower()
+    # Extract dress code using NLP and event type
+    text = f"{event.title} {event.description}".lower()
     
-    formal_indicators = ['formal', 'black tie', 'evening wear', 'cocktail attire']
-    business_indicators = ['business', 'smart casual', 'business casual', 'semi-formal']
+    formal_indicators = {
+        'black tie', 'formal attire', 'evening wear', 'cocktail dress',
+        'formal dress', 'tuxedo', 'gala', 'ball', 'formal dinner'
+    }
+    business_indicators = {
+        'business casual', 'smart casual', 'business attire', 'semi-formal',
+        'professional attire', 'business dress', 'conference', 'networking'
+    }
     
     if any(indicator in text for indicator in formal_indicators):
         event.attributes.dress_code = 'formal'
@@ -280,11 +387,55 @@ def classify_event(event: Event) -> Event:
     else:
         event.attributes.dress_code = 'casual'
     
+    # Set target audience based on content analysis
+    audience_indicators = {
+        'family': {'family friendly', 'all ages', 'kids', 'children', 'parent'},
+        'professional': {'networking', 'business', 'career', 'professional', 'industry'},
+        'academic': {'student', 'academic', 'research', 'university', 'college'},
+        'adult': {'21+', 'adult only', 'mature'}
+    }
+    
+    event.attributes.target_audience = []
+    for audience, indicators in audience_indicators.items():
+        if any(indicator in text for indicator in indicators):
+            event.attributes.target_audience.append(audience)
+    
+    if not event.attributes.target_audience:
+        event.attributes.target_audience = ['general']
+    
     return event
 
 async def process_event(event: Event) -> Event:
-    """Process an event through the complete pipeline"""
-    event = clean_event_data(event)
-    event = await enrich_event(event)
-    event = classify_event(event)
-    return event 
+    """Process and enrich an event with all available data"""
+    if not event:
+        raise ValueError("Event cannot be None")
+    
+    try:
+        logger.info(f"Starting event processing for event_id: {event.event_id}")
+        
+        # Clean data first
+        try:
+            event = clean_event_data(event)
+            logger.debug(f"Event {event.event_id} cleaned successfully")
+        except Exception as e:
+            logger.error(f"Error cleaning event {event.event_id}: {str(e)}")
+            # Continue processing even if cleaning fails
+        
+        # Enrich with additional data
+        try:
+            event = await enrich_event(event)
+            logger.debug(f"Event {event.event_id} enriched successfully")
+        except Exception as e:
+            logger.error(f"Error enriching event {event.event_id}: {str(e)}")
+            # Continue processing even if enrichment partially fails
+        
+        # Final validation
+        if not event.title or not event.description:
+            logger.warning(f"Event {event.event_id} missing critical fields after processing")
+        
+        logger.info(f"Completed event processing for event_id: {event.event_id}")
+        return event
+        
+    except Exception as e:
+        logger.error(f"Critical error processing event {event.event_id}: {str(e)}")
+        raise 
