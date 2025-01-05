@@ -1,49 +1,11 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
-from app.database import get_db, Base, engine
+from app.database import get_db
 from app.models.preferences import UserPreferences
-from sqlalchemy.orm import Session
-from app.utils.auth import create_session
 from unittest.mock import patch
 
-# Create test database tables
-Base.metadata.create_all(bind=engine)
-
-@pytest.fixture
-def test_db():
-    """Create a fresh test database for each test."""
-    Base.metadata.create_all(bind=engine)
-    try:
-        db = Session(engine)
-        yield db
-    finally:
-        db.close()
-        Base.metadata.drop_all(bind=engine)
-
-@pytest.fixture
-def client(test_db):
-    """Create a test client with a test database."""
-    def override_get_db():
-        try:
-            yield test_db
-        finally:
-            test_db.close()
-            
-    app.dependency_overrides[get_db] = override_get_db
-    return TestClient(app)
-
-@pytest.fixture
-def mock_session():
-    """Create a mock session for testing."""
-    with patch("app.utils.auth.verify_session") as mock:
-        mock.return_value = {
-            "user_id": "test-user-123",
-            "access_token_payload": {}
-        }
-        yield mock
-
-def test_get_preferences_no_preferences(client, mock_session):
+def test_get_preferences_no_preferences(client, mock_supertokens):
     """Test getting preferences when none exist."""
     response = client.get("/api/preferences/")
     assert response.status_code == 200
@@ -63,7 +25,7 @@ def test_get_preferences_no_preferences(client, mock_session):
     assert data["preferred_times"] == []
     assert data["min_rating"] == 0.5
 
-def test_update_preferences(client, mock_session, test_db):
+def test_update_preferences(client, mock_supertokens, test_db):
     """Test updating preferences."""
     preferences = {
         "preferred_categories": ["restaurants", "bars"],
@@ -100,7 +62,7 @@ def test_update_preferences(client, mock_session, test_db):
     assert user_preferences.preferred_times == preferences["preferred_times"]
     assert user_preferences.min_rating == preferences["min_rating"]
 
-def test_update_preferences_invalid_data(client, mock_session):
+def test_update_preferences_invalid_data(client, mock_supertokens):
     """Test updating preferences with invalid data."""
     invalid_preferences = {
         "preferred_categories": ["restaurants", "bars"],

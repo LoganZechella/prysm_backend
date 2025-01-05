@@ -39,6 +39,8 @@ ENV/
 .settings/
 *.sublime-workspace
 *.sublime-project
+master_plan.txt
+summary_of_work.txt
 
 # Jupyter Notebook
 .ipynb_checkpoints

@@ -17,7 +17,8 @@ class DynamoDBStorage(StorageInterface):
         """Initialize DynamoDB storage"""
         self.table_name = table_name
         self.dynamodb = boto3.resource('dynamodb', region_name=aws_region)
-        self.table = self.dynamodb.Table(table_name)
+        self.table = self.dynamodb.Table(table_name) # type: ignore
+
         
         # Create table if it doesn't exist
         try:
@@ -28,7 +29,7 @@ class DynamoDBStorage(StorageInterface):
     
     def _create_table(self):
         """Create DynamoDB table with required indexes"""
-        table = self.dynamodb.create_table(
+        table = self.dynamodb.create_table( # type: ignore
             TableName=self.table_name,
             KeySchema=[
                 {

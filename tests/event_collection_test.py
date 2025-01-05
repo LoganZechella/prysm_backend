@@ -7,7 +7,7 @@ import os
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.event_collection_utils import (
+from app.utils.event_collection import (
     EventbriteClient,
     transform_eventbrite_event,
     calculate_price_tier,
@@ -81,7 +81,7 @@ def test_eventbrite_client_initialization():
     """Test EventbriteClient initialization with missing API key."""
     with patch.dict('os.environ', clear=True):
         with pytest.raises(ValueError):
-            EventbriteClient()
+            EventbriteClient(api_key="")
 
 def test_eventbrite_search_events():
     """Test EventbriteClient search_events method."""
@@ -89,7 +89,7 @@ def test_eventbrite_search_events():
         mock_get.return_value.json.return_value = {'events': []}
         mock_get.return_value.raise_for_status = Mock()
         
-        client = EventbriteClient()
+        client = EventbriteClient(api_key='test_key')
         result = client.search_events(
             location='San Francisco, CA',
             categories=['music'],
@@ -102,28 +102,28 @@ def test_eventbrite_search_events():
 
 def test_transform_eventbrite_event(mock_eventbrite_response):
     """Test event data transformation."""
-    transformed = transform_eventbrite_event(mock_eventbrite_response)
+    event = transform_eventbrite_event(mock_eventbrite_response)
     
-    assert transformed['event_id'] == '123456789'
-    assert transformed['title'] == 'Test Event'
-    assert transformed['location']['city'] == 'San Francisco'
-    assert transformed['price_info']['min_price'] == 25.00
-    assert transformed['price_info']['max_price'] == 50.00
-    assert transformed['attributes']['indoor_outdoor'] == 'indoor'
-    assert transformed['attributes']['age_restriction'] == '21+'
-    assert 'wheelchair' in transformed['attributes']['accessibility_features']
-    assert transformed['attributes']['dress_code'] == 'formal'
-    assert len(transformed['categories']) == 2
-    assert len(transformed['tags']) == 2
-    assert len(transformed['images']) == 2
-    assert transformed['metadata']['verified'] is True
+    assert event.event_id == '123456789'
+    assert event.title == 'Test Event'
+    assert event.location.city == 'San Francisco'
+    assert event.price_info.min_price == 25.00
+    assert event.price_info.max_price == 50.00
+    assert event.attributes.indoor_outdoor == 'indoor'
+    assert event.attributes.age_restriction == 21
+    assert 'wheelchair_accessible' in event.attributes.accessibility_features
+    assert event.attributes.dress_code == 'formal'
+    assert len(event.categories) == 2
+    assert len(event.tags) == 2
+    assert len(event.images) == 2
+    assert event.metadata.verified is True
 
 def test_calculate_price_tier():
     """Test price tier calculation."""
-    assert calculate_price_tier(None, None) == 'free'
-    assert calculate_price_tier(10.00, 20.00) == 'budget'
-    assert calculate_price_tier(30.00, 70.00) == 'medium'
-    assert calculate_price_tier(80.00, 120.00) == 'premium'
+    assert calculate_price_tier(0.0) == 'free'
+    assert calculate_price_tier(10.00) == 'low'
+    assert calculate_price_tier(30.00) == 'medium'
+    assert calculate_price_tier(80.00) == 'high'
 
 def test_calculate_popularity_score(mock_eventbrite_response):
     """Test popularity score calculation."""
@@ -132,45 +132,27 @@ def test_calculate_popularity_score(mock_eventbrite_response):
 
 def test_extract_indoor_outdoor():
     """Test indoor/outdoor extraction."""
-    indoor_event = {'description': {'text': 'This is an indoor event'}}
-    outdoor_event = {'description': {'text': 'This is an outdoor event'}}
-    both_event = {'description': {'text': 'This event has both indoor and outdoor spaces'}}
-    unspecified_event = {'description': {'text': 'This is an event'}}
-    
-    assert extract_indoor_outdoor(indoor_event) == 'indoor'
-    assert extract_indoor_outdoor(outdoor_event) == 'outdoor'
-    assert extract_indoor_outdoor(both_event) == 'both'
-    assert extract_indoor_outdoor(unspecified_event) == 'indoor'
+    assert extract_indoor_outdoor("This is an indoor event") == 'indoor'
+    assert extract_indoor_outdoor("This is an outdoor event") == 'outdoor'
+    assert extract_indoor_outdoor("This event has both indoor and outdoor spaces") == 'unknown'
+    assert extract_indoor_outdoor("This is an event") == 'unknown'
 
 def test_extract_age_restriction():
     """Test age restriction extraction."""
-    event_21_plus = {'description': {'text': 'This is a 21+ event'}}
-    event_18_plus = {'description': {'text': 'This is an 18+ event'}}
-    event_all_ages = {'description': {'text': 'This is an all ages event'}}
-    
-    assert extract_age_restriction(event_21_plus) == '21+'
-    assert extract_age_restriction(event_18_plus) == '18+'
-    assert extract_age_restriction(event_all_ages) == 'all'
+    assert extract_age_restriction("This is a 21+ event") == 21
+    assert extract_age_restriction("This is an 18+ event") == 18
+    assert extract_age_restriction("This is an all ages event") is None
 
 def test_extract_accessibility_features():
     """Test accessibility features extraction."""
-    event = {
-        'description': {
-            'text': 'This venue is wheelchair accessible with audio assistance and sign language interpretation'
-        }
-    }
-    
-    features = extract_accessibility_features(event)
-    assert 'wheelchair' in features
+    description = "This venue is wheelchair accessible with audio assistance and sign language interpretation"
+    features = extract_accessibility_features(description)
+    assert 'wheelchair_accessible' in features
     assert 'hearing_assistance' in features
     assert 'sign_language' in features
 
 def test_extract_dress_code():
     """Test dress code extraction."""
-    formal_event = {'description': {'text': 'Black tie event'}}
-    business_event = {'description': {'text': 'Business casual attire'}}
-    casual_event = {'description': {'text': 'Come as you are'}}
-    
-    assert extract_dress_code(formal_event) == 'formal'
-    assert extract_dress_code(business_event) == 'business'
-    assert extract_dress_code(casual_event) == 'casual' 
+    assert extract_dress_code("Black tie event") == 'formal'
+    assert extract_dress_code("Business casual attire") == 'business casual'
+    assert extract_dress_code("Come as you are") == 'casual' 

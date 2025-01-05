@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routes import preferences, auth, recommendations
 import os
 from supertokens_python import init, InputAppInfo
-from supertokens_python.recipe import session
+from supertokens_python.recipe import session, thirdpartyemailpassword
 from supertokens_python.recipe.session.framework.fastapi import verify_session
 from supertokens_python.framework.fastapi import get_middleware
 from supertokens_python.supertokens import SupertokensConfig
@@ -24,7 +24,13 @@ init(
     ),
     framework='fastapi',
     recipe_list=[
-        session.init()
+        session.init(
+            cookie_domain=os.getenv("COOKIE_DOMAIN", "localhost"),
+            cookie_secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+            cookie_same_site="lax",
+            session_expired_status_code=401
+        ),
+        thirdpartyemailpassword.init()
     ],
     mode='asgi'
 )
@@ -41,11 +47,11 @@ app.add_middleware(
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"],
-    allow_headers=["*"],  # Allow all headers for development
-    expose_headers=["Content-Type", "Authorization", "anti-csrf"]
+    allow_headers=["Content-Type", "Authorization", "anti-csrf", "rid", "fdi-version", "st-auth-mode"],
+    expose_headers=["Content-Type", "Authorization", "anti-csrf", "rid", "fdi-version", "st-auth-mode"]
 )
 
-# Include routers
+# Register routers
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(preferences.router, prefix="/api/preferences", tags=["preferences"])
 app.include_router(recommendations.router, prefix="/api/recommendations", tags=["recommendations"]) 

@@ -1,14 +1,12 @@
-import json
 import pytest
-import pandas as pd
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
-from utils.data_aggregation_utils import (
+import json
+
+from app.utils.data_aggregation import (
     aggregate_event_data,
-    aggregate_trends_data,
-    generate_event_insights,
-    generate_trends_insights,
-    save_insights_to_bigquery
+    calculate_metrics,
+    generate_report
 )
 
 @pytest.fixture

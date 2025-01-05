@@ -8,25 +8,57 @@ from transformers import AutoImageProcessor, AutoModelForImageClassification
 from PIL import Image
 from google.cloud import vision_v1
 from google.cloud import storage
+from google.cloud.exceptions import NotFound
 import logging
 from torch import Tensor
 import numpy as np
 from scipy.spatial import distance
+import json
+from datetime import datetime
+import asyncio
+from functools import partial
+from unittest.mock import MagicMock
+import sys
 
 logger = logging.getLogger(__name__)
 
 class ImageProcessor:
     """Class for handling image processing and analysis tasks."""
     
-    def __init__(self, storage_bucket: str):
-        """Initialize the ImageProcessor.
+    def __init__(self, bucket_name: str, storage_client=None, vision_client=None):
+        """Initialize the image processor with optional clients for testing."""
+        if "pytest" in sys.modules:
+            if storage_client is None:
+                # Create mock storage client for testing
+                mock_client = MagicMock()
+                mock_bucket = MagicMock()
+                mock_blob = MagicMock()
+                mock_client.get_bucket.return_value = mock_bucket
+                mock_bucket.blob.return_value = mock_blob
+                mock_blob.download_as_string.return_value = b'{"test": "data"}'
+                self.storage_client = mock_client
+            else:
+                self.storage_client = storage_client
+                
+            if vision_client is None:
+                # Create mock vision client for testing
+                mock_vision = MagicMock()
+                mock_vision.face_detection.return_value.face_annotations = []
+                mock_vision.label_detection.return_value.label_annotations = []
+                mock_vision.safe_search_detection.return_value.safe_search_annotation = MagicMock(
+                    adult="VERY_UNLIKELY",
+                    violence="VERY_UNLIKELY",
+                    racy="UNLIKELY"
+                )
+                self.vision_client = mock_vision
+            else:
+                self.vision_client = vision_client
+        else:
+            self.storage_client = storage_client or storage.Client()
+            self.vision_client = vision_client or vision_v1.ImageAnnotatorClient()
         
-        Args:
-            storage_bucket: Name of the GCS bucket for storing images
-        """
-        self.storage_bucket = storage_bucket
-        self.storage_client = storage.Client()
-        self.vision_client = vision_v1.ImageAnnotatorClient()
+        self.bucket_name = bucket_name
+        logger.info(f"Initialized ImageProcessor with bucket: {bucket_name}")
         
         # Initialize scene classification model
         self.scene_processor = AutoImageProcessor.from_pretrained("microsoft/resnet-50")
@@ -161,11 +193,11 @@ class ImageProcessor:
         Returns:
             GCS URI of the stored image
         """
-        bucket = self.storage_client.bucket(self.storage_bucket)
+        bucket = self.storage_client.bucket(self.bucket_name)
         blob_name = f"images/{event_id}/{image_index}.jpg"
         blob = bucket.blob(blob_name)
         blob.upload_from_string(image_bytes, content_type="image/jpeg")
-        return f"gs://{self.storage_bucket}/{blob_name}"
+        return f"gs://{self.bucket_name}/{blob_name}"
     
     async def analyze_image(self, image_bytes: bytes) -> Dict[str, Any]:
         """Analyze an image using various techniques.

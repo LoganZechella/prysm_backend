@@ -34,6 +34,7 @@ class EventAttributes(BaseModel):
     age_restriction: str = "all"  # all, 18+, 21+
     accessibility_features: List[str] = Field(default_factory=list)
     dress_code: str = "casual"  # casual, business, formal
+    target_audience: List[str] = Field(default_factory=lambda: ["general"])  # family, professional, academic, adult, general
 
     @field_validator('indoor_outdoor')
     @classmethod
@@ -49,6 +50,15 @@ class EventAttributes(BaseModel):
         allowed = ['all', '18+', '21+']
         if v not in allowed:
             raise ValueError(f'age_restriction must be one of {allowed}')
+        return v
+
+    @field_validator('target_audience')
+    @classmethod
+    def validate_target_audience(cls, v: List[str]) -> List[str]:
+        allowed = {'family', 'professional', 'academic', 'adult', 'general'}
+        invalid = [x for x in v if x not in allowed]
+        if invalid:
+            raise ValueError(f'target_audience values must be from {allowed}, got invalid values: {invalid}')
         return v
 
 class SourceInfo(BaseModel):

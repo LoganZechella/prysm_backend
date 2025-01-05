@@ -11,8 +11,8 @@ from functools import partial
 logger = logging.getLogger(__name__)
 
 class StorageManager:
-    def __init__(self):
-        self.client = storage.Client()
+    def __init__(self, client=None):
+        self.client = client or storage.Client()
         self.raw_bucket_name = os.getenv('GCS_RAW_BUCKET')
         self.processed_bucket_name = os.getenv('GCS_PROCESSED_BUCKET')
         # Skip bucket existence check since we know they exist

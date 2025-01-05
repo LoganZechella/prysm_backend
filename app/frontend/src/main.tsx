@@ -4,6 +4,8 @@ import App from './App'
 import './index.css'
 import SuperTokens from "supertokens-auth-react"
 import Session from "supertokens-auth-react/recipe/session"
+import ThirdParty from "supertokens-auth-react/recipe/thirdparty"
+import EmailPassword from "supertokens-auth-react/recipe/emailpassword"
 
 SuperTokens.init({
   appInfo: {
@@ -14,6 +16,21 @@ SuperTokens.init({
     websiteBasePath: "/auth"
   },
   recipeList: [
+    EmailPassword.init(),
+    ThirdParty.init({
+      signInAndUpFeature: {
+        providers: [
+          {
+            id: "google",
+            name: "Google"
+          },
+          {
+            id: "linkedin",
+            name: "LinkedIn"
+          }
+        ]
+      }
+    }),
     Session.init()
   ]
 })

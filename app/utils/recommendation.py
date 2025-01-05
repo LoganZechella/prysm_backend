@@ -10,6 +10,7 @@ import math
 from functools import lru_cache
 import hashlib
 from cachetools import TTLCache, cached
+import traceback
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -60,6 +61,8 @@ class RecommendationEngine:
             # First, filter events by user's hard constraints
             filtered_events = []
             for event in available_events:
+                logger.debug(f"\nEvaluating event: {event.title}")
+                
                 # Check price constraints
                 if event.price_info.min_price > user_preferences.max_price:
                     logger.debug(f"Event {event.event_id} excluded: price {event.price_info.min_price} > {user_preferences.max_price}")
@@ -77,6 +80,7 @@ class RecommendationEngine:
                         event.location.coordinates['lat'],
                         event.location.coordinates['lng']
                     )
+                    logger.debug(f"Event distance: {distance}km, max radius: {user_preferences.preferred_radius}km")
                     if distance > user_preferences.preferred_radius:
                         logger.debug(f"Event {event.event_id} excluded: distance {distance}km > radius {user_preferences.preferred_radius}km")
                         continue
@@ -90,14 +94,16 @@ class RecommendationEngine:
                     if not has_matching_category:
                         logger.debug(f"Event {event.event_id} excluded: categories {event.categories} don't match preferences {user_preferences.preferred_categories}")
                         continue
+                    logger.debug(f"Event {event.event_id} has matching categories")
                 
                 filtered_events.append(event)
+                logger.debug(f"Event {event.event_id} passed all filters")
             
             logger.debug(f"After filtering: {len(filtered_events)} events")
             
             if not filtered_events:
-                logger.warning("No events match user preferences")
-                return []
+                logger.warning("No events match user preferences, returning all events with scores")
+                filtered_events = available_events
             
             # Calculate scores for filtered events
             scored_events = []
@@ -116,7 +122,8 @@ class RecommendationEngine:
             return recommendations
             
         except Exception as e:
-            logger.error(f"Error getting recommendations: {str(e)}", exc_info=True)
+            logger.error(f"Error getting recommendations: {str(e)}")
+            logger.error(f"Recommendation error traceback: {traceback.format_exc()}")
             return []
     
     def _calculate_event_score(self, event: Event, preferences: UserPreferences) -> float:
@@ -128,13 +135,15 @@ class RecommendationEngine:
             # Category match score
             if preferences.preferred_categories:
                 category_matches = sum(1 for cat in event.categories if cat in preferences.preferred_categories)
-                category_score = category_matches / len(preferences.preferred_categories)
+                category_score = category_matches / len(preferences.preferred_categories) if preferences.preferred_categories else 0.0
+                logger.debug(f"Category score for {event.event_id}: {category_score}")
                 scores.append(category_score)
                 weights.append(0.4)  # High weight for category matches
             
             # Price score
             if preferences.price_preferences:
                 price_score = 1.0 if event.price_info.price_tier in preferences.price_preferences else 0.0
+                logger.debug(f"Price score for {event.event_id}: {price_score}")
                 scores.append(price_score)
                 weights.append(0.3)
             
@@ -147,21 +156,27 @@ class RecommendationEngine:
                     event.location.coordinates['lng']
                 )
                 location_score = max(0, 1 - (distance / preferences.preferred_radius))
+                logger.debug(f"Location score for {event.event_id}: {location_score}")
                 scores.append(location_score)
                 weights.append(0.3)
             
             if not scores:
-                return 0.0
+                logger.debug(f"No scores calculated for {event.event_id}, returning default score")
+                return 0.5
                 
             # Calculate weighted average
             total_score = sum(s * w for s, w in zip(scores, weights))
             total_weight = sum(weights)
             
-            return total_score / total_weight
+            final_score = total_score / total_weight
+            logger.debug(f"Final score for {event.event_id}: {final_score}")
+            
+            return final_score
             
         except Exception as e:
-            logger.error(f"Error calculating event score: {str(e)}", exc_info=True)
-            return 0.0 
+            logger.error(f"Error calculating event score: {str(e)}")
+            logger.error(f"Score calculation error traceback: {traceback.format_exc()}")
+            return 0.0
     
     def _haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Calculate Haversine distance between two points in kilometers"""
