@@ -11,7 +11,9 @@ import {
   Icon,
 } from '@chakra-ui/react'
 import { FaSpotify, FaGoogle, FaLinkedin } from 'react-icons/fa'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
+import Session from 'supertokens-auth-react/recipe/session'
 
 // Configure axios defaults
 axios.defaults.withCredentials = true
@@ -31,6 +33,35 @@ const AuthDashboard = () => {
   })
   const [isLoading, setIsLoading] = useState(true)
   const toast = useToast()
+  const navigate = useNavigate()
+
+  // Handle URL query parameters
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const error = params.get('error')
+    const success = params.get('success')
+
+    if (error) {
+      toast({
+        title: 'Authentication Error',
+        description: error.replace(/_/g, ' '),
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      })
+      // Clear the error from URL
+      navigate('/auth/dashboard', { replace: true })
+    } else if (success) {
+      toast({
+        title: 'Authentication Successful',
+        status: 'success',
+        duration: 3000,
+        isClosable: true,
+      })
+      // Clear the success from URL
+      navigate('/auth/dashboard', { replace: true })
+    }
+  }, [navigate, toast])
 
   const checkAuthStatus = async () => {
     try {
@@ -57,14 +88,48 @@ const AuthDashboard = () => {
   }
 
   useEffect(() => {
+    const initSession = async () => {
+      try {
+        // Check if we have a session
+        const session = await Session.doesSessionExist()
+        if (!session) {
+          // Create a new session with a temporary user ID
+          await axios.get('/api/auth/init-session', {
+            withCredentials: true,
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+            }
+          })
+        }
+      } catch (error) {
+        console.error('Error initializing session:', error)
+      }
+    }
+
+    initSession()
     checkAuthStatus()
     // Check status every 5 seconds
     const interval = setInterval(checkAuthStatus, 5000)
     return () => clearInterval(interval)
   }, [])
 
-  const handleLogin = (service: string) => {
-    window.location.href = `/api/auth/${service}`
+  const handleLogin = async (service: string) => {
+    try {
+      const response = await axios.get(`/api/auth/${service}`)
+      if (response.data.auth_url) {
+        window.location.href = response.data.auth_url
+      }
+    } catch (error) {
+      console.error(`Error initiating ${service} login:`, error)
+      toast({
+        title: `Error connecting to ${service}`,
+        description: error instanceof Error ? error.message : 'Unknown error',
+        status: 'error',
+        duration: 3000,
+        isClosable: true,
+      })
+    }
   }
 
   const handleLogout = async () => {
@@ -77,7 +142,7 @@ const AuthDashboard = () => {
       })
       await checkAuthStatus()
       toast({
-        title: 'Successfully logged out',
+        title: 'Logged out successfully',
         status: 'success',
         duration: 3000,
         isClosable: true,
@@ -124,6 +189,8 @@ const AuthDashboard = () => {
     </Box>
   )
 
+  const isAnyServiceConnected = Object.values(authStatus).some(status => status)
+
   return (
     <Container maxW="container.xl" py={10}>
       <Stack direction="column" spacing={8} align="center">
@@ -152,15 +219,24 @@ const AuthDashboard = () => {
           />
         </Grid>
 
-        {(authStatus.spotify || authStatus.google || authStatus.linkedin) && (
-          <Button 
-            colorScheme="red" 
-            onClick={handleLogout}
-            isLoading={isLoading}
-            loadingText="Logging out..."
-          >
-            Logout from all services
-          </Button>
+        {isAnyServiceConnected && (
+          <Stack direction="column" spacing={4} align="center">
+            <Button
+              colorScheme="blue"
+              size="lg"
+              onClick={() => navigate('/recommendations')}
+            >
+              View Recommendations
+            </Button>
+            <Button 
+              colorScheme="red" 
+              onClick={handleLogout}
+              isLoading={isLoading}
+              loadingText="Logging out..."
+            >
+              Logout from all services
+            </Button>
+          </Stack>
         )}
       </Stack>
     </Container>

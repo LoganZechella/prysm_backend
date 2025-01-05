@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, time
 import json
 from pydantic import BaseModel, Field, field_validator, ConfigDict, model_validator, ValidationInfo
 from typing import List, Union
+import hashlib
 
 class Location(BaseModel):
     venue_name: str = ""
@@ -207,6 +208,19 @@ class Event(BaseModel):
             all_cats.update(self.category_hierarchy.get(category, []))
         return all_cats 
 
+    def __hash__(self) -> int:
+        """Make Event hashable for caching"""
+        return hash(self.event_id)
+    
+    def to_hash(self) -> str:
+        """Convert event to a hash string for caching"""
+        return hashlib.sha256(self.to_json().encode()).hexdigest()
+    
+    @classmethod
+    def from_hash(cls, hash_str: str) -> 'Event':
+        """Create event from a hash string (placeholder - actual implementation would need a cache)"""
+        raise NotImplementedError("Event.from_hash() needs to be implemented with a proper caching mechanism")
+
 class UserPreferences(BaseModel):
     """User preferences for event recommendations"""
     user_id: str
@@ -217,7 +231,10 @@ class UserPreferences(BaseModel):
     preferred_times: List[Tuple[time, time]] = Field(default_factory=list)  # List of time ranges
     excluded_categories: List[str] = Field(default_factory=list)
     min_rating: float = 0.0
-    max_price: Optional[float] = None
+    min_price: float = 0.0  # Added for recommendation engine
+    max_price: float = float('inf')  # Changed to non-optional with default
+    max_distance: float = 50.0  # Added for recommendation engine (in kilometers)
+    preferred_days: List[str] = Field(default_factory=list)  # Added for recommendation engine
     accessibility_requirements: List[str] = Field(default_factory=list)
     indoor_outdoor_preference: Optional[str] = None  # 'indoor', 'outdoor', or 'both'
     age_restriction_preference: Optional[str] = None  # '18+', '21+', 'all'
