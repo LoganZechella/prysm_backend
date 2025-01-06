@@ -16,7 +16,7 @@ load_dotenv()
 
 # Import the SQLAlchemy declarative Base and all models
 from app.database import Base
-from app.models import UserPreferences, OAuthToken
+from app.models import UserPreferences, OAuthToken, Event
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

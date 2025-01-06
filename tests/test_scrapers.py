@@ -1,175 +1,90 @@
 import pytest
+import os
 from datetime import datetime, timedelta
-import json
-from unittest.mock import patch, MagicMock
-import aiohttp
-from app.scrapers.base import BaseScraper
-from app.scrapers.eventbrite import EventbriteScraper
+from app.scrapers.meetup_scrapfly import MeetupScrapflyScraper
+from app.scrapers.stubhub_scrapfly import StubhubScrapflyScraper
 
-class TestScraper(BaseScraper):
-    """Test implementation of BaseScraper"""
-    
-    async def scrape_events(self, location, date_range=None):
-        return []
-    
-    async def get_event_details(self, event_url):
-        return {}
+# Test location (San Francisco)
+TEST_LOCATION = {
+    'name': 'San Francisco',
+    'lat': 37.7749,
+    'lng': -122.4194,
+    'radius': 10  # km
+}
 
-@pytest.fixture
-def test_scraper():
-    """Create a test scraper instance"""
-    return TestScraper("test_platform")
-
-@pytest.fixture
-def eventbrite_scraper():
-    """Create an Eventbrite scraper instance"""
-    return EventbriteScraper("test_api_key")
-
-@pytest.fixture
-def mock_response():
-    """Create a mock response"""
-    class MockResponse:
-        def __init__(self, status, text):
-            self.status = status
-            self._text = text
-        
-        async def text(self):
-            return self._text
-        
-        async def __aexit__(self, exc_type, exc, tb):
-            pass
-        
-        async def __aenter__(self):
-            return self
-    
-    return MockResponse
+# Test date range (next 7 days)
+TEST_DATE_RANGE = {
+    'start': datetime.utcnow(),
+    'end': datetime.utcnow() + timedelta(days=7)
+}
 
 @pytest.mark.asyncio
-async def test_base_scraper_fetch_page(test_scraper, mock_response):
-    """Test base scraper fetch_page method"""
-    test_html = "<html><body>Test</body></html>"
+async def test_meetup_scraper():
+    """Test Meetup scraper implementation"""
+    scrapfly_key = os.getenv("SCRAPFLY_API_KEY")
+    assert scrapfly_key, "SCRAPFLY_API_KEY environment variable is required"
     
-    async with test_scraper:
-        # Test successful fetch
-        with patch('aiohttp.ClientSession.get') as mock_get:
-            mock_get.return_value = mock_response(200, test_html)
-            result = await test_scraper.fetch_page("http://test.com")
-            assert result == test_html
+    scraper = MeetupScrapflyScraper(scrapfly_key)
+    events = await scraper.scrape_events(TEST_LOCATION, TEST_DATE_RANGE)
+    
+    # Verify we got some events
+    assert len(events) > 0, "No events were scraped from Meetup"
+    
+    # Verify event structure
+    for event in events:
+        assert 'title' in event
+        assert 'description' in event
+        assert 'event_id' in event
+        assert 'source' in event
+        assert event['source']['platform'] == 'meetup'
+        assert 'start_datetime' in event
+        assert 'location' in event
+        assert 'venue_name' in event['location']
+        assert 'address' in event['location']
         
-        # Test rate limit handling
-        with patch('aiohttp.ClientSession.get') as mock_get:
-            mock_get.return_value = mock_response(429, "")
-            result = await test_scraper.fetch_page("http://test.com")
-            assert result is None
-        
-        # Test error handling
-        with patch('aiohttp.ClientSession.get') as mock_get:
-            mock_get.side_effect = aiohttp.ClientError()
-            result = await test_scraper.fetch_page("http://test.com")
-            assert result is None
+        # Print event details for manual verification
+        print(f"\nMeetup Event: {event['title']}")
+        print(f"Date: {event['start_datetime']}")
+        print(f"Venue: {event['location']['venue_name']}")
+        print(f"URL: {event['source']['url']}")
 
 @pytest.mark.asyncio
-async def test_eventbrite_scrape_events(eventbrite_scraper, mock_response):
-    """Test Eventbrite scraper events method"""
-    # Mock event search response
-    search_response = {
-        "events": [
-            {"id": "123", "name": {"text": "Test Event"}}
-        ]
-    }
+async def test_stubhub_scraper():
+    """Test StubHub scraper implementation"""
+    scrapfly_key = os.getenv("SCRAPFLY_API_KEY")
+    assert scrapfly_key, "SCRAPFLY_API_KEY environment variable is required"
     
-    # Mock event details response
-    event_details = {
-        "id": "123",
-        "name": {"text": "Test Event"},
-        "description": {"text": "Test Description"},
-        "start": {"utc": "2024-01-01T19:00:00Z"},
-        "end": {"utc": "2024-01-01T22:00:00Z"},
-        "url": "https://test.com/event",
-        "venue": {
-            "name": "Test Venue",
-            "address": {
-                "localized_address_display": "123 Test St",
-                "city": "Test City",
-                "region": "TC",
-                "country": "US"
-            },
-            "latitude": "37.7749",
-            "longitude": "-122.4194"
-        },
-        "category": {"name": "Music"},
-        "ticket_classes": [
-            {
-                "cost": {"major_value": "25.00"},
-                "free": False
-            }
-        ],
-        "logo": {"original": {"url": "https://test.com/image.jpg"}}
-    }
+    scraper = StubhubScrapflyScraper(scrapfly_key)
+    events = await scraper.scrape_events(TEST_LOCATION, TEST_DATE_RANGE)
     
-    location = {"lat": 37.7749, "lng": -122.4194}
-    date_range = {
-        "start": datetime.utcnow(),
-        "end": datetime.utcnow() + timedelta(days=7)
-    }
+    # Verify we got some events
+    assert len(events) > 0, "No events were scraped from StubHub"
     
-    async with eventbrite_scraper:
-        with patch('app.scrapers.eventbrite.EventbriteScraper.fetch_page') as mock_fetch:
-            # Mock search response
-            mock_fetch.side_effect = [
-                json.dumps(search_response),
-                json.dumps(event_details)
-            ]
-            
-            events = await eventbrite_scraper.scrape_events(location, date_range)
-            
-            assert len(events) == 1
-            event = events[0]
-            assert event["event_id"] == "123"
-            assert event["title"] == "Test Event"
-            assert event["location"]["venue_name"] == "Test Venue"
-            assert event["price_info"]["price_tier"] == "medium"
+    # Verify event structure
+    for event in events:
+        assert 'title' in event
+        assert 'event_id' in event
+        assert 'source' in event
+        assert event['source']['platform'] == 'stubhub'
+        assert 'start_datetime' in event
+        assert 'location' in event
+        assert 'venue_name' in event['location']
+        assert 'address' in event['location']
+        
+        # Print event details for manual verification
+        print(f"\nStubHub Event: {event['title']}")
+        print(f"Date: {event['start_datetime']}")
+        print(f"Venue: {event['location']['venue_name']}")
+        print(f"URL: {event['source']['url']}")
 
-@pytest.mark.asyncio
-async def test_eventbrite_get_event_details(eventbrite_scraper, mock_response):
-    """Test Eventbrite get_event_details method"""
-    event_details = {
-        "id": "123",
-        "name": {"text": "Test Event"},
-        "description": {"text": "Test Description"},
-        "start": {"utc": "2024-01-01T19:00:00Z"},
-        "end": {"utc": "2024-01-01T22:00:00Z"},
-        "url": "https://test.com/event",
-        "venue": {
-            "name": "Test Venue",
-            "address": {
-                "localized_address_display": "123 Test St",
-                "city": "Test City",
-                "region": "TC",
-                "country": "US"
-            },
-            "latitude": "37.7749",
-            "longitude": "-122.4194"
-        },
-        "category": {"name": "Music"},
-        "ticket_classes": [
-            {
-                "cost": {"major_value": "25.00"},
-                "free": False
-            }
-        ],
-        "logo": {"original": {"url": "https://test.com/image.jpg"}}
-    }
+if __name__ == "__main__":
+    import asyncio
     
-    async with eventbrite_scraper:
-        with patch('app.scrapers.eventbrite.EventbriteScraper.fetch_page') as mock_fetch:
-            mock_fetch.return_value = json.dumps(event_details)
-            
-            result = await eventbrite_scraper.get_event_details("123")
-            
-            assert result["id"] == "123"
-            assert result["title"] == "Test Event"
-            assert result["venue"]["name"] == "Test Venue"
-            assert result["price"]["tier"] == "medium"
-            assert result["price"]["min"] == 25.0
-            assert result["price"]["max"] == 25.0 
+    async def run_tests():
+        print("\nTesting Meetup Scraper...")
+        await test_meetup_scraper()
+        
+        print("\nTesting StubHub Scraper...")
+        await test_stubhub_scraper()
+    
+    asyncio.run(run_tests()) 

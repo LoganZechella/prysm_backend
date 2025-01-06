@@ -462,7 +462,7 @@ async def linkedin_auth_handler(request: Request):
     """Handle LinkedIn OAuth authentication."""
     try:
         client_id = os.getenv("LINKEDIN_CLIENT_ID")
-        redirect_uri = os.getenv("LINKEDIN_REDIRECT_URI", "http://localhost:3001/api/auth/linkedin/callback")
+        redirect_uri = os.getenv("LINKEDIN_REDIRECT_URI", "http://localhost:8000/api/auth/linkedin/callback")
         
         if not client_id:
             raise HTTPException(
@@ -470,13 +470,23 @@ async def linkedin_auth_handler(request: Request):
                 detail="LinkedIn OAuth credentials not configured"
             )
             
+        # Get user_id from Authorization header
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise HTTPException(
+                status_code=401,
+                detail="No valid token provided"
+            )
+
+        token = auth_header.split(" ")[1]
+            
         # Construct LinkedIn authorization URL
         params = {
             "client_id": client_id,
             "response_type": "code",
             "redirect_uri": redirect_uri,
-            "scope": "profile",  # Most basic scope for LinkedIn v2 API
-            "state": "random_state_string"  # In production, this should be a secure random string
+            "scope": "profile",  # Using only the basic profile scope
+            "state": token  # Pass the JWT token as state
         }
         
         auth_url = f"https://www.linkedin.com/oauth/v2/authorization?{urlencode(params)}"
@@ -493,6 +503,7 @@ async def linkedin_auth_handler(request: Request):
 async def linkedin_callback_handler(
     request: Request,
     code: Optional[str] = None,
+    state: Optional[str] = None,
     error: Optional[str] = None,
     error_description: Optional[str] = None,
     db: Session = Depends(get_db)
@@ -516,12 +527,32 @@ async def linkedin_callback_handler(
     try:
         client_id = os.getenv("LINKEDIN_CLIENT_ID")
         client_secret = os.getenv("LINKEDIN_CLIENT_SECRET")
-        redirect_uri = os.getenv("LINKEDIN_REDIRECT_URI", "http://localhost:3001/api/auth/linkedin/callback")
+        redirect_uri = os.getenv("LINKEDIN_REDIRECT_URI", "http://localhost:8000/api/auth/linkedin/callback")
         
         if not client_id or not client_secret:
             logger.error("LinkedIn credentials not configured")
             return RedirectResponse(
                 url="http://localhost:3001/auth/dashboard?error=configuration_error",
+                status_code=303
+            )
+
+        # Get user_id from state parameter
+        if not state:
+            logger.error("No state parameter found")
+            return RedirectResponse(
+                url="http://localhost:3001/auth/dashboard?error=no_session",
+                status_code=303
+            )
+
+        try:
+            payload = jwt.decode(state, SECRET_KEY_BYTES, algorithms=[ALGORITHM])
+            user_id = payload.get("sub")
+            if not user_id:
+                raise jwt.InvalidTokenError("No user_id in token")
+        except jwt.InvalidTokenError as e:
+            logger.error(f"Invalid state token: {str(e)}")
+            return RedirectResponse(
+                url="http://localhost:3001/auth/dashboard?error=invalid_session",
                 status_code=303
             )
             
@@ -545,61 +576,43 @@ async def linkedin_callback_handler(
                     url="http://localhost:3001/auth/dashboard?error=token_exchange_failed",
                     status_code=303
                 )
+            
+        # Store token in database
+        oauth_token = OAuthToken(
+            user_id=user_id,
+            provider="linkedin",  # Changed from 'service' to match other providers
+            access_token=token_info["access_token"],
+            refresh_token=token_info.get("refresh_token"),
+            expires_at=datetime.utcnow() + timedelta(seconds=token_info.get("expires_in", 3600))
+        )
         
-        try:
-            # Try to get session
-            session = await verify_session(request)
-            user_id = session.get_user_id()
-            
-            # Store token in database
-            oauth_token = OAuthToken(
-                user_id=user_id,
-                service="linkedin",
-                access_token=token_info["access_token"],
-                refresh_token=token_info.get("refresh_token"),  # LinkedIn might not provide refresh token
-                token_type=token_info.get("token_type", "Bearer"),
-                scope=token_info.get("scope", ""),
-                expires_at=datetime.utcnow() + timedelta(seconds=token_info.get("expires_in", 3600))
-            )
-            
-            # Update or insert token
-            existing_token = db.query(OAuthToken).filter_by(
-                user_id=user_id,
-                service="linkedin"
-            ).first()
-            
-            if existing_token:
-                for key, value in oauth_token.__dict__.items():
-                    if not key.startswith('_'):
-                        setattr(existing_token, key, value)
-            else:
-                db.add(oauth_token)
-                
-            db.commit()
-            
-            # Update session with LinkedIn connection status
-            await session.merge_into_access_token_payload({
-                "linkedin_connected": True
-            })
-            
-            return RedirectResponse(
-                url="http://localhost:3001/auth/dashboard?success=true",
-                status_code=303
-            )
-            
-        except Exception as e:
-            logger.error(f"Error storing token: {str(e)}")
-            return RedirectResponse(
-                url="http://localhost:3001/auth/dashboard?error=token_storage_failed",
-                status_code=303
-            )
+        # Update or insert token
+        existing_token = db.query(OAuthToken).filter_by(
+            user_id=user_id,
+            provider="linkedin"  # Changed from 'service' to match other providers
+        ).first()
         
+        if existing_token:
+            for key, value in oauth_token.__dict__.items():
+                if not key.startswith('_'):
+                    setattr(existing_token, key, value)
+        else:
+            db.add(oauth_token)
+            
+        db.commit()
+        logger.info(f"Successfully stored LinkedIn token for user {user_id}")
+        
+        return RedirectResponse(
+            url="http://localhost:3001/auth/dashboard?success=true",
+            status_code=303
+        )
+            
     except Exception as e:
         logger.error(f"Error handling LinkedIn callback: {str(e)}", exc_info=True)
         return RedirectResponse(
             url="http://localhost:3001/auth/dashboard?error=authorization_failed",
             status_code=303
-        ) 
+        )
 
 @router.post("/session/refresh")
 async def refresh_session_handler(request: Request):

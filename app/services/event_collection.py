@@ -1,118 +1,136 @@
-from typing import Dict, List, Any, Optional
-from datetime import datetime
+from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta
+import asyncio
 import logging
-from app.schemas.event import Event, PriceInfo, Location, SourceInfo, EventAttributes, EventMetadata
+from sqlalchemy.orm import Session
+from app.models.event import Event
+from app.scrapers.eventbrite import EventbriteScraper
+from app.scrapers.ticketmaster import TicketmasterScraper
+from app.scrapers.meetup_scrapfly import MeetupScrapflyScraper
+from app.scrapers.stubhub_scrapfly import StubhubScrapflyScraper
+from app.scrapers.meta import MetaEventScraper
+import os
 
 logger = logging.getLogger(__name__)
 
-class EventbriteClient:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-
-    async def search_events(self, **kwargs) -> List[Dict[str, Any]]:
-        # TODO: Implement actual Eventbrite API call
-        return []
-
-def transform_eventbrite_event(event_data: Dict[str, Any]) -> Event:
-    # TODO: Implement actual transformation logic
-    return Event(
-        event_id="",
-        title="",
-        description="",
-        start_datetime=datetime.now(),
-        location=Location(
-            venue_name="",
-            address="",
-            city="",
-            state="",
-            country="",
-            coordinates={"lat": 0.0, "lng": 0.0}
-        ),
-        categories=[],  # Empty list for now
-        attributes=EventAttributes(
-            indoor_outdoor="indoor",  # Default value
-            age_restriction="all",    # Default value
-            accessibility_features=[]
-        ),
-        source=SourceInfo(
-            platform="eventbrite",
-            url="",
-            last_updated=datetime.now()
-        ),
-        metadata=EventMetadata(
-            popularity_score=0.5,  # Default value
-            tags=[]
-        )
-    )
-
-def calculate_price_tier(price: float) -> str:
-    if price == 0:
-        return "free"
-    elif price < 20:
-        return "low"
-    elif price < 50:
-        return "medium"
-    else:
-        return "high"
-
-def calculate_popularity_score(event_data: Dict[str, Any]) -> float:
-    # TODO: Implement popularity calculation
-    return 0.0
-
-def extract_indoor_outdoor(description: str) -> str:
-    keywords_indoor = ["indoor", "inside", "indoors"]
-    keywords_outdoor = ["outdoor", "outside", "outdoors", "open-air"]
+class EventCollectionService:
+    """Service to collect and store events from various sources"""
     
-    description = description.lower()
+    def __init__(self):
+        """Initialize the event collection service"""
+        self.scrapers = []
+        self._initialize_scrapers()
     
-    if any(keyword in description for keyword in keywords_indoor):
-        return "indoor"
-    elif any(keyword in description for keyword in keywords_outdoor):
-        return "outdoor"
-    return "unknown"
-
-def extract_age_restriction(description: str) -> Optional[int]:
-    # Look for common age restriction patterns (e.g., "18+", "21 and over")
-    import re
+    def _initialize_scrapers(self):
+        """Initialize available scrapers with API keys"""
+        # Eventbrite
+        eventbrite_key = os.getenv("EVENTBRITE_API_KEY")
+        if eventbrite_key:
+            self.scrapers.append(EventbriteScraper(eventbrite_key))
+            
+        # Ticketmaster
+        ticketmaster_key = os.getenv("TICKETMASTER_API_KEY")
+        if ticketmaster_key:
+            self.scrapers.append(TicketmasterScraper(ticketmaster_key))
+            
+        # Meetup (using Scrapfly)
+        scrapfly_key = os.getenv("SCRAPFLY_API_KEY")
+        if scrapfly_key:
+            self.scrapers.append(MeetupScrapflyScraper(scrapfly_key))
+            
+        # StubHub (using Scrapfly)
+        if scrapfly_key:  # Reuse same Scrapfly key
+            self.scrapers.append(StubhubScrapflyScraper(scrapfly_key))
+            
+        # Meta (Facebook) Events
+        meta_app_id = os.getenv("META_APP_ID")
+        meta_app_secret = os.getenv("META_APP_SECRET")
+        meta_access_token = os.getenv("META_ACCESS_TOKEN")
+        if meta_app_id and meta_app_secret and meta_access_token:
+            self.scrapers.append(MetaEventScraper(
+                app_id=meta_app_id,
+                app_secret=meta_app_secret,
+                access_token=meta_access_token
+            ))
     
-    patterns = [
-        r'(\d+)\s*\+',
-        r'(\d+)\s*and\s*over',
-        r'(\d+)\s*or\s*older'
-    ]
+    async def collect_events(
+        self,
+        db: Session,
+        locations: List[Dict[str, Any]],
+        date_range: Optional[Dict[str, datetime]] = None
+    ) -> int:
+        """
+        Collect events from all sources for given locations and date range.
+        Returns the number of new events collected.
+        """
+        if not date_range:
+            # Default to events in the next 30 days
+            date_range = {
+                'start': datetime.utcnow(),
+                'end': datetime.utcnow() + timedelta(days=30)
+            }
+        
+        new_events_count = 0
+        
+        for scraper in self.scrapers:
+            try:
+                async with scraper:  # Use context manager for session handling
+                    for location in locations:
+                        events = await scraper.scrape_events(location, date_range)
+                        new_events_count += await self._store_events(db, events)
+            except Exception as e:
+                logger.error(f"Error with {scraper.platform} scraper: {str(e)}")
+                continue
+        
+        return new_events_count
     
-    for pattern in patterns:
-        match = re.search(pattern, description)
-        if match:
-            return int(match.group(1))
-    return None
-
-def extract_accessibility_features(description: str) -> List[str]:
-    features = []
-    keywords = {
-        "wheelchair accessible": "wheelchair_accessible",
-        "sign language": "sign_language",
-        "hearing impaired": "hearing_assistance",
-        "ada compliant": "ada_compliant"
-    }
-    
-    description = description.lower()
-    for keyword, feature in keywords.items():
-        if keyword in description:
-            features.append(feature)
-    
-    return features
-
-def extract_dress_code(description: str) -> Optional[str]:
-    dress_codes = {
-        "casual": ["casual", "come as you are"],
-        "business casual": ["business casual", "smart casual"],
-        "formal": ["formal", "black tie", "evening wear"],
-        "costume": ["costume", "fancy dress", "dress up"]
-    }
-    
-    description = description.lower()
-    for code, keywords in dress_codes.items():
-        if any(keyword in description for keyword in keywords):
-            return code
-    return None 
+    async def _store_events(self, db: Session, events: List[Dict[str, Any]]) -> int:
+        """Store events in the database, returns number of new events stored"""
+        new_events_count = 0
+        
+        for event_data in events:
+            try:
+                # Check if event already exists
+                existing_event = db.query(Event).filter(
+                    Event.source == event_data['source']['platform'],
+                    Event.source_id == event_data['event_id']
+                ).first()
+                
+                if existing_event:
+                    # Update existing event
+                    for key, value in event_data.items():
+                        if key not in ['id', 'created_at']:
+                            setattr(existing_event, key, value)
+                    existing_event.updated_at = datetime.utcnow()
+                else:
+                    # Create new event
+                    new_event = Event(
+                        title=event_data['title'],
+                        description=event_data['description'],
+                        start_time=event_data['start_datetime'],
+                        end_time=event_data['end_datetime'],
+                        location=event_data['location']['coordinates'],
+                        categories=event_data['categories'],
+                        price_info=event_data['price_info'],
+                        source=event_data['source']['platform'],
+                        source_id=event_data['event_id'],
+                        url=event_data['source']['url'],
+                        image_url=event_data['images'][0] if event_data['images'] else None,
+                        venue={
+                            'name': event_data['location']['venue_name'],
+                            'address': event_data['location']['address']
+                        },
+                        organizer=None,  # Will be populated by detailed scrape
+                        tags=event_data['tags']
+                    )
+                    db.add(new_event)
+                    new_events_count += 1
+                
+                db.commit()
+                
+            except Exception as e:
+                logger.error(f"Error storing event {event_data.get('event_id')}: {str(e)}")
+                db.rollback()
+                continue
+        
+        return new_events_count 

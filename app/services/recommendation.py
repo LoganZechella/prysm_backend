@@ -1,138 +1,178 @@
-from typing import List, Tuple, Dict, Optional
-from datetime import datetime, time
-import numpy as np
-from geopy.distance import geodesic
-from app.schemas import (
-    Event,
-    UserPreferences,
-    Location,
-    PriceInfo,
-    EventAttributes
-)
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+import logging
+from app.models.event import Event
+from app.models.preferences import UserPreferences
+from app.recommendation.engine import RecommendationEngine
+from app.services.location_recommendations import LocationService
+from app.services.price_normalization import PriceNormalizer
+from app.services.category_extraction import CategoryExtractor
+
+logger = logging.getLogger(__name__)
 
 class RecommendationService:
-    def calculate_category_score(self, event: Event, preferences: UserPreferences) -> float:
-        """Calculate how well an event's categories match user preferences."""
-        if not preferences.preferred_categories:
-            return 1.0  # No preferences means all categories are acceptable
-        
-        matching_categories = set(event.categories) & set(preferences.preferred_categories)
-        if not matching_categories:
-            return 0.0
-        
-        return len(matching_categories) / len(preferences.preferred_categories)
+    def __init__(self):
+        """Initialize recommendation service with required components."""
+        self.recommendation_engine = RecommendationEngine()
+        self.location_service = LocationService()
+        self.price_normalizer = PriceNormalizer()
+        self.category_extractor = CategoryExtractor()
 
-    def calculate_location_score(self, event: Event, preferences: UserPreferences) -> float:
-        """Calculate how well an event's location matches user preferences."""
-        if not preferences.preferred_location:
-            return 1.0  # No location preference means all locations are acceptable
-        
-        event_coords = (event.location.coordinates["lat"], event.location.coordinates["lng"])
-        user_coords = (preferences.preferred_location["lat"], preferences.preferred_location["lng"])
-        
-        distance = geodesic(event_coords, user_coords).miles
-        
-        if distance > preferences.max_distance:
-            return 0.0
-        
-        # Linear decay: score decreases as distance increases
-        return 1.0 - (distance / preferences.max_distance)
-
-    def calculate_price_score(self, event: Event, preferences: UserPreferences) -> float:
-        """Calculate how well an event's price matches user preferences."""
-        if not event.price_info:
-            return 1.0  # Free events or events without price info get full score
-        
-        # Check price range
-        if (event.price_info.min_price > preferences.max_price or 
-            event.price_info.max_price < preferences.min_price):
-            return 0.0
-        
-        # Check price tier preference
-        if preferences.price_preferences:
-            if event.price_info.price_tier not in preferences.price_preferences:
-                return 0.5  # Partial match if tier doesn't match but price is in range
-        
-        return 1.0
-
-    def calculate_time_score(self, event: Event, preferences: UserPreferences) -> float:
-        """Calculate how well an event's time matches user preferences."""
-        event_time = event.start_datetime.time()
-        event_day = event.start_datetime.strftime("%A").lower()
-        
-        day_score = 1.0
-        if preferences.preferred_days:
-            day_score = 1.0 if event_day in preferences.preferred_days else 0.5
-        
-        time_score = 1.0
-        if preferences.preferred_times:
-            time_score = 0.0
-            for start, end in preferences.preferred_times:
-                if start <= event_time <= end:
-                    time_score = 1.0
-                    break
-        
-        return (day_score + time_score) / 2
-
-    def calculate_attribute_score(self, event: Event, preferences: UserPreferences) -> float:
-        """Calculate how well an event's attributes match user preferences."""
-        scores = []
-        
-        # Indoor/Outdoor preference
-        if preferences.indoor_outdoor_preference:
-            scores.append(1.0 if event.attributes.indoor_outdoor == preferences.indoor_outdoor_preference else 0.0)
-        
-        # Accessibility requirements
-        if preferences.accessibility_requirements:
-            accessibility_score = len(set(preferences.accessibility_requirements) & 
-                                   set(event.attributes.accessibility_features)) / len(preferences.accessibility_requirements)
-            scores.append(accessibility_score)
-        
-        if not scores:
-            return 1.0  # No attribute preferences means full score
-        
-        return float(np.mean(scores))
-
-    def get_personalized_recommendations(
+    async def get_personalized_recommendations(
         self,
         preferences: UserPreferences,
         events: List[Event],
+        limit: Optional[int] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> List[Event]:
+        """
+        Generate personalized event recommendations based on user preferences.
+        
+        Args:
+            preferences: User preferences
+            events: List of available events
+            limit: Maximum number of recommendations to return
+            start_date: Optional start date filter
+            end_date: Optional end date filter
+            
+        Returns:
+            List of recommended events
+        """
+        try:
+            # Filter events by date range if provided
+            filtered_events = events
+            if start_date:
+                filtered_events = [e for e in filtered_events if e.start_time >= start_date]
+            if end_date:
+                filtered_events = [e for e in filtered_events if e.start_time <= end_date]
+
+            # Get recommendations using the recommendation engine
+            recommendations = self.recommendation_engine.get_personalized_recommendations(
+                preferences=preferences,
+                events=filtered_events,
+                limit=limit
+            )
+
+            return recommendations
+
+        except Exception as e:
+            logger.error(f"Error generating personalized recommendations: {str(e)}")
+            return []
+
+    async def get_trending_recommendations(
+        self,
+        events: List[Event],
+        timeframe_days: int = 7,
         limit: Optional[int] = None
     ) -> List[Event]:
-        """Generate personalized event recommendations based on user preferences."""
-        scored_events = []
+        """
+        Get trending events based on popularity and recency.
         
-        for event in events:
-            category_score = self.calculate_category_score(event, preferences)
-            if category_score == 0.0:
-                continue  # Skip events that don't match any preferred categories
+        Args:
+            events: List of available events
+            timeframe_days: Number of days to consider for trending
+            limit: Maximum number of recommendations to return
             
-            location_score = self.calculate_location_score(event, preferences)
-            if location_score == 0.0:
-                continue  # Skip events that are too far
-            
-            price_score = self.calculate_price_score(event, preferences)
-            time_score = self.calculate_time_score(event, preferences)
-            attribute_score = self.calculate_attribute_score(event, preferences)
-            
-            # Calculate weighted average score
-            total_score = (
-                category_score * 0.3 +
-                location_score * 0.25 +
-                price_score * 0.2 +
-                time_score * 0.15 +
-                attribute_score * 0.1
+        Returns:
+            List of trending events
+        """
+        try:
+            # Get trending recommendations using the recommendation engine
+            trending = self.recommendation_engine.get_trending_recommendations(
+                events=events,
+                timeframe_days=timeframe_days,
+                limit=limit
             )
+
+            return trending
+
+        except Exception as e:
+            logger.error(f"Error getting trending recommendations: {str(e)}")
+            return []
+
+    async def get_similar_events(
+        self,
+        event: Event,
+        events: List[Event],
+        limit: Optional[int] = None
+    ) -> List[Event]:
+        """
+        Find events similar to a given event.
+        
+        Args:
+            event: Reference event
+            events: List of events to search through
+            limit: Maximum number of similar events to return
             
-            scored_events.append((event, total_score))
+        Returns:
+            List of similar events
+        """
+        try:
+            # Create temporary preferences based on the reference event
+            temp_preferences = UserPreferences(
+                user_id="temp",
+                preferred_categories=event.categories,
+                excluded_categories=[],
+                min_price=0.0,
+                max_price=float('inf'),
+                preferred_location=event.location,
+                preferred_days=[],
+                preferred_times=[]
+            )
+
+            # Get recommendations using the recommendation engine
+            similar_events = self.recommendation_engine.get_personalized_recommendations(
+                preferences=temp_preferences,
+                events=[e for e in events if e.id != event.id],  # Exclude the reference event
+                limit=limit
+            )
+
+            return similar_events
+
+        except Exception as e:
+            logger.error(f"Error finding similar events: {str(e)}")
+            return []
+
+    async def get_category_recommendations(
+        self,
+        category: str,
+        events: List[Event],
+        limit: Optional[int] = None
+    ) -> List[Event]:
+        """
+        Get recommendations for a specific category.
         
-        # Sort by score in descending order
-        scored_events.sort(key=lambda x: x[1], reverse=True)
-        
-        # Return only the events, without scores
-        recommended_events = [event for event, _ in scored_events]
-        
-        if limit:
-            recommended_events = recommended_events[:limit]
-        
-        return recommended_events 
+        Args:
+            category: Target category
+            events: List of available events
+            limit: Maximum number of recommendations to return
+            
+        Returns:
+            List of recommended events in the category
+        """
+        try:
+            # Create temporary preferences for the category
+            temp_preferences = UserPreferences(
+                user_id="temp",
+                preferred_categories=[category],
+                excluded_categories=[],
+                min_price=0.0,
+                max_price=float('inf'),
+                preferred_location=None,
+                preferred_days=[],
+                preferred_times=[]
+            )
+
+            # Get recommendations using the recommendation engine
+            category_events = self.recommendation_engine.get_personalized_recommendations(
+                preferences=temp_preferences,
+                events=events,
+                limit=limit
+            )
+
+            return category_events
+
+        except Exception as e:
+            logger.error(f"Error getting category recommendations: {str(e)}")
+            return [] 
