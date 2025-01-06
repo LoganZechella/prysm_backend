@@ -13,25 +13,43 @@ import {
   Spinner,
   Badge,
 } from '@chakra-ui/react'
-import axios from 'axios'
+import api from '../utils/api'
 import { useNavigate } from 'react-router-dom'
+import { AxiosError } from 'axios'
 
 interface Event {
-  event_id: string
+  id: number
   title: string
   description: string
-  start_datetime: string
+  start_time: string
+  end_time: string | null
   location: {
-    venue_name: string
-    city: string
+    lat: number
+    lng: number
   }
   categories: string[]
   price_info: {
-    min_price: number
-    max_price: number
-    price_tier: string
-  }
-  match_score: number
+    min_price?: number
+    max_price?: number
+    currency?: string
+  } | null
+  source: string
+  source_id: string
+  url: string | null
+  image_url: string | null
+  venue: {
+    name: string
+    address: string
+  } | null
+  organizer: {
+    name: string
+    description?: string
+  } | null
+  tags: string[] | null
+  view_count: number
+  like_count: number
+  created_at: string
+  updated_at: string
 }
 
 interface RecommendationResponse {
@@ -54,10 +72,14 @@ const RecommendationList = () => {
   const fetchRecommendations = async () => {
     try {
       setIsLoading(true)
-      const response = await axios.get<RecommendationResponse>('/api/recommendations')
+      const response = await api.get<RecommendationResponse>('/recommendations')
       setRecommendations(response.data.recommendations.events)
     } catch (error) {
       console.error('Error fetching recommendations:', error)
+      if ((error as AxiosError).response?.status === 401) {
+        navigate('/auth/dashboard')
+        return
+      }
       toast({
         title: 'Error fetching recommendations',
         description: error instanceof Error ? error.message : 'Unknown error',
@@ -77,9 +99,13 @@ const RecommendationList = () => {
   const sortedAndFilteredRecommendations = recommendations
     .filter(event => !filterCategory || event.categories.includes(filterCategory))
     .sort((a, b) => {
-      if (sortBy === 'match_score') return b.match_score - a.match_score
-      if (sortBy === 'price') return a.price_info.min_price - b.price_info.min_price
-      if (sortBy === 'date') return new Date(a.start_datetime).getTime() - new Date(b.start_datetime).getTime()
+      if (sortBy === 'match_score') return 0  // No match score yet
+      if (sortBy === 'price') {
+        const aPrice = a.price_info?.min_price ?? 0
+        const bPrice = b.price_info?.min_price ?? 0
+        return aPrice - bPrice
+      }
+      if (sortBy === 'date') return new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
       return 0
     })
 
@@ -108,20 +134,19 @@ const RecommendationList = () => {
           ))}
         </HStack>
         <Text color="gray.600">
-          {new Date(event.start_datetime).toLocaleDateString()} at{' '}
-          {new Date(event.start_datetime).toLocaleTimeString()}
+          {new Date(event.start_time).toLocaleDateString()} at{' '}
+          {new Date(event.start_time).toLocaleTimeString()}
         </Text>
         <Text>
-          {event.location.venue_name}, {event.location.city}
+          {event.venue?.name}, {event.venue?.address}
         </Text>
-        <Text fontWeight="bold">
-          ${event.price_info.min_price.toFixed(2)}
-          {event.price_info.max_price > event.price_info.min_price &&
-            ` - $${event.price_info.max_price.toFixed(2)}`}
-        </Text>
-        <Text color="green.500" fontWeight="bold">
-          Match Score: {(event.match_score * 100).toFixed(0)}%
-        </Text>
+        {event.price_info && (
+          <Text fontWeight="bold">
+            ${event.price_info.min_price?.toFixed(2)}
+            {event.price_info.max_price && event.price_info.max_price > event.price_info.min_price! &&
+              ` - $${event.price_info.max_price.toFixed(2)}`}
+          </Text>
+        )}
       </Stack>
     </Box>
   )
@@ -184,7 +209,7 @@ const RecommendationList = () => {
         ) : (
           <SimpleGrid columns={{ base: 1, md: 2, lg: 3 }} spacing={6}>
             {sortedAndFilteredRecommendations.map(event => (
-              <EventCard key={event.event_id} event={event} />
+              <EventCard key={event.id} event={event} />
             ))}
           </SimpleGrid>
         )}

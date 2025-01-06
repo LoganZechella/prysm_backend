@@ -1,78 +1,96 @@
-from typing import List, Dict, Any
-from math import radians, sin, cos, sqrt, atan2
-from app.schemas.event import Event
+from typing import Dict, Any, Optional, Tuple
+from geopy.distance import geodesic
+from geopy.geocoders import Nominatim
+import logging
+from geopy.location import Location
 
-def calculate_distance(point1: Dict[str, float], point2: Dict[str, float]) -> float:
-    """
-    Calculate the distance between two points using the Haversine formula.
-    
-    Args:
-        point1: Dictionary with lat/lon coordinates
-        point2: Dictionary with lat/lon coordinates
-        
-    Returns:
-        Distance in kilometers
-    """
-    R = 6371  # Earth's radius in kilometers
-    
-    lat1 = radians(point1['lat'])
-    lon1 = radians(point1['lon'])
-    lat2 = radians(point2['lat'])
-    lon2 = radians(point2['lon'])
-    
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1-a))
-    
-    return R * c
+logger = logging.getLogger(__name__)
 
-def filter_events_by_distance(
-    events: List[Event],
-    user_location: Dict[str, float],
-    max_distance: float
-) -> List[Event]:
-    """
-    Filter events by distance from user location.
-    
-    Args:
-        events: List of events to filter
-        user_location: Dictionary with user's lat/lon coordinates
-        max_distance: Maximum distance in kilometers
+class LocationService:
+    def __init__(self):
+        self.geocoder = Nominatim(user_agent="prysm_backend")
         
-    Returns:
-        List of events within max_distance
-    """
-    filtered_events = []
-    
-    for event in events:
-        if not event.location or not event.location.coordinates:
-            continue
+    def calculate_distance(self, location1: Dict[str, Any], location2: Dict[str, Any]) -> float:
+        """
+        Calculate the distance between two locations in kilometers.
+        
+        Args:
+            location1: Dict with lat/lng or address
+            location2: Dict with lat/lng or address
             
-        distance = calculate_distance(user_location, event.location.coordinates)
-        if distance <= max_distance:
-            filtered_events.append(event)
+        Returns:
+            Distance in kilometers
+        """
+        try:
+            # Get coordinates for location1
+            if 'lat' in location1 and 'lng' in location1:
+                coords1 = (location1['lat'], location1['lng'])
+            else:
+                coords1 = self._get_coordinates(location1.get('address', ''))
+                
+            # Get coordinates for location2
+            if 'lat' in location2 and 'lng' in location2:
+                coords2 = (location2['lat'], location2['lng'])
+            else:
+                coords2 = self._get_coordinates(location2.get('address', ''))
+                
+            if not coords1 or not coords2:
+                return float('inf')
+                
+            return geodesic(coords1, coords2).kilometers
             
-    return filtered_events
-
-def sort_events_by_distance(
-    events: List[Event],
-    user_location: Dict[str, float]
-) -> List[Event]:
-    """
-    Sort events by distance from user location.
-    
-    Args:
-        events: List of events to sort
-        user_location: Dictionary with user's lat/lon coordinates
-        
-    Returns:
-        List of events sorted by distance (closest first)
-    """
-    def get_distance(event: Event) -> float:
-        if not event.location or not event.location.coordinates:
+        except Exception as e:
+            logger.error(f"Error calculating distance: {str(e)}")
             return float('inf')
-        return calculate_distance(user_location, event.location.coordinates)
-    
-    return sorted(events, key=get_distance) 
+            
+    def _get_coordinates(self, address: str) -> Optional[Tuple[float, float]]:
+        """Get coordinates for an address using geocoding."""
+        try:
+            if not address:
+                return None
+                
+            location: Optional[Location] = self.geocoder.geocode(address)
+            if location:
+                return (location.latitude, location.longitude)
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error geocoding address: {str(e)}")
+            return None
+            
+    def get_location_info(self, location: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Get detailed location information including city, state, country.
+        
+        Args:
+            location: Dict with lat/lng or address
+            
+        Returns:
+            Dict with location details
+        """
+        try:
+            # If we have coordinates, do reverse geocoding
+            if 'lat' in location and 'lng' in location:
+                result: Optional[Location] = self.geocoder.reverse((location['lat'], location['lng']))
+            # Otherwise do forward geocoding
+            else:
+                result: Optional[Location] = self.geocoder.geocode(location.get('address', ''))
+                
+            if not result:
+                return {}
+                
+            # Parse the address components
+            address = result.raw.get('address', {})
+            return {
+                'city': address.get('city', ''),
+                'state': address.get('state', ''),
+                'country': address.get('country', ''),
+                'postal_code': address.get('postcode', ''),
+                'formatted_address': result.address,
+                'lat': result.latitude,
+                'lng': result.longitude
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting location info: {str(e)}")
+            return {} 

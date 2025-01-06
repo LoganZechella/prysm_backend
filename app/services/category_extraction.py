@@ -1,124 +1,209 @@
-from typing import Set, Dict, List
+from typing import List, Dict, Any, Optional
+import logging
+from collections import defaultdict
 import spacy
-from app.schemas.event import Event
-from app.schemas.category import CategoryHierarchy
+from textblob import TextBlob
+import re
 
-# Load spaCy model
-nlp = spacy.load("en_core_web_sm")
+logger = logging.getLogger(__name__)
 
-def extract_categories_from_text(text: str) -> Set[str]:
-    """
-    Extract potential categories from text using NLP.
-    
-    Args:
-        text: Text to analyze
-        
-    Returns:
-        Set of extracted categories
-    """
-    if not text:
-        return set()
-        
-    # Process text with spaCy
-    doc = nlp(text.lower())
-    
-    # Extract nouns and noun phrases
-    categories = set()
-    for token in doc:
-        if token.pos_ in {"NOUN", "PROPN"}:
-            categories.add(token.lemma_)
+class CategoryExtractor:
+    def __init__(self):
+        """Initialize the category extractor with NLP models and category mappings."""
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+        except Exception as e:
+            logger.error(f"Error loading spaCy model: {str(e)}")
+            self.nlp = None
             
-    for chunk in doc.noun_chunks:
-        categories.add(chunk.root.lemma_)
+        # Define main category hierarchies
+        self.category_hierarchy = {
+            "music": ["concert", "festival", "live music", "dj", "band", "orchestra"],
+            "sports": ["game", "match", "tournament", "race", "competition"],
+            "arts": ["exhibition", "gallery", "museum", "theater", "dance", "performance"],
+            "food": ["dining", "tasting", "culinary", "restaurant", "food festival"],
+            "education": ["workshop", "seminar", "conference", "lecture", "class"],
+            "networking": ["meetup", "social", "networking", "mixer", "business"],
+            "entertainment": ["show", "comedy", "movie", "film", "party"],
+            "outdoor": ["hiking", "camping", "adventure", "nature", "outdoor"],
+            "technology": ["tech", "hackathon", "coding", "digital", "software"],
+            "wellness": ["fitness", "yoga", "meditation", "health", "wellness"]
+        }
         
-    # Filter categories against known category list
-    valid_categories = {"music", "concert", "festival", "sports", "arts", 
-                       "theater", "dance", "comedy", "food", "drink",
-                       "jazz", "blues", "rock", "classical", "pop"}
-                       
-    return categories.intersection(valid_categories)
-
-def get_category_hierarchy(category: str) -> List[str]:
-    """
-    Get the hierarchical path for a category.
-    
-    Args:
-        category: Category to get hierarchy for
-        
-    Returns:
-        List of categories from root to leaf
-    """
-    # Define category hierarchy
-    hierarchy = CategoryHierarchy()
-    
-    # Add root categories
-    hierarchy.add_category("events")
-    hierarchy.add_category("music", parent="events")
-    hierarchy.add_category("sports", parent="events")
-    hierarchy.add_category("arts", parent="events")
-    
-    # Add music subcategories
-    hierarchy.add_category("concert", parent="music")
-    hierarchy.add_category("festival", parent="music")
-    hierarchy.add_category("jazz", parent="music")
-    hierarchy.add_category("blues", parent="music")
-    hierarchy.add_category("rock", parent="music")
-    hierarchy.add_category("classical", parent="music")
-    hierarchy.add_category("pop", parent="music")
-    
-    # Add arts subcategories
-    hierarchy.add_category("theater", parent="arts")
-    hierarchy.add_category("dance", parent="arts")
-    hierarchy.add_category("comedy", parent="arts")
-    
-    # Get ancestors for category
-    if category in hierarchy.nodes:
-        return hierarchy.get_ancestors(category) + [category]
-    return []
-
-def extract_hierarchical_categories(event: Event) -> Dict[str, float]:
-    """
-    Extract categories with confidence scores from event data.
-    
-    Args:
-        event: Event to extract categories from
-        
-    Returns:
-        Dictionary mapping categories to confidence scores
-    """
-    # Extract categories from title and description
-    text = f"{event.title} {event.description}"
-    categories = extract_categories_from_text(text)
-    
-    # Calculate confidence scores and add hierarchical categories
-    scores = {}
-    for category in categories:
-        # Direct matches get high confidence
-        scores[category] = 0.8
-        
-        # Add parent categories with lower confidence
-        for parent in get_category_hierarchy(category)[:-1]:  # Exclude the category itself
-            if parent not in scores:
-                scores[parent] = 0.5
-            else:
-                scores[parent] = max(scores[parent], 0.5)
+        # Create reverse mapping for faster lookups
+        self.keyword_to_category = {}
+        for category, keywords in self.category_hierarchy.items():
+            for keyword in keywords:
+                self.keyword_to_category[keyword] = category
                 
-    return scores
-
-def enrich_event_categories(event: Event) -> Event:
-    """
-    Enrich event with extracted and hierarchical categories.
-    
-    Args:
-        event: Event to enrich
+    def extract_categories(self, event_data: Dict[str, Any]) -> List[str]:
+        """
+        Extract categories from event data using NLP and rule-based approaches.
         
-    Returns:
-        Enriched event with updated categories
-    """
-    # Extract categories with confidence scores
-    category_scores = extract_hierarchical_categories(event)
-    
-    # Update event categories, keeping existing ones
-    event.categories = list(set(event.categories).union(category_scores.keys()))
-    
-    return event 
+        Args:
+            event_data: Dictionary containing event information with fields:
+                - title: string
+                - description: string
+                - tags: list of strings (optional)
+                
+        Returns:
+            List of extracted categories
+        """
+        try:
+            categories = set()
+            
+            # Process title and description
+            text = f"{event_data.get('title', '')} {event_data.get('description', '')}"
+            
+            # Add any explicit tags
+            tags = event_data.get('tags', [])
+            if tags:
+                text = f"{text} {' '.join(tags)}"
+                
+            # Clean and normalize text
+            text = self._preprocess_text(text)
+            
+            # Extract categories using different methods
+            categories.update(self._extract_from_keywords(text))
+            categories.update(self._extract_from_nlp(text))
+            
+            # If no categories found, try to infer from context
+            if not categories:
+                categories.add(self._infer_default_category(text))
+                
+            return list(categories)
+            
+        except Exception as e:
+            logger.error(f"Error extracting categories: {str(e)}")
+            return ["uncategorized"]
+            
+    def _preprocess_text(self, text: str) -> str:
+        """Clean and normalize text for processing."""
+        if not text:
+            return ""
+            
+        # Convert to lowercase
+        text = text.lower()
+        
+        # Remove special characters
+        text = re.sub(r'[^\w\s]', ' ', text)
+        
+        # Remove extra whitespace
+        text = ' '.join(text.split())
+        
+        return text
+        
+    def _extract_from_keywords(self, text: str) -> set:
+        """Extract categories based on keyword matching."""
+        categories = set()
+        
+        for keyword, category in self.keyword_to_category.items():
+            if keyword in text:
+                categories.add(category)
+                
+        return categories
+        
+    def _extract_from_nlp(self, text: str) -> set:
+        """Extract categories using NLP analysis."""
+        categories = set()
+        
+        if not self.nlp:
+            return categories
+            
+        try:
+            # Process text with spaCy
+            doc = self.nlp(text)
+            
+            # Extract entities and noun phrases
+            entities = [ent.text.lower() for ent in doc.ents]
+            noun_phrases = [chunk.text.lower() for chunk in doc.noun_chunks]
+            
+            # Check entities and noun phrases against keywords
+            for item in entities + noun_phrases:
+                for keyword, category in self.keyword_to_category.items():
+                    if keyword in item:
+                        categories.add(category)
+                        
+            # Use TextBlob for additional analysis
+            blob = TextBlob(text)
+            
+            # Check noun phrases from TextBlob
+            for phrase in str(blob.noun_phrases).split():
+                for keyword, category in self.keyword_to_category.items():
+                    if keyword in phrase:
+                        categories.add(category)
+                        
+        except Exception as e:
+            logger.error(f"Error in NLP processing: {str(e)}")
+            
+        return categories
+        
+    def _infer_default_category(self, text: str) -> str:
+        """Infer a default category when no clear categories are found."""
+        # Simple heuristic based on common words
+        entertainment_words = {"fun", "event", "show", "entertainment"}
+        education_words = {"learn", "study", "education", "training"}
+        social_words = {"meet", "social", "community", "network"}
+        
+        words = set(text.split())
+        
+        if words & entertainment_words:
+            return "entertainment"
+        elif words & education_words:
+            return "education"
+        elif words & social_words:
+            return "networking"
+            
+        return "uncategorized"
+        
+    def get_category_confidence(self, category: str, text: str) -> float:
+        """
+        Calculate confidence score for a category assignment.
+        
+        Args:
+            category: Category to check
+            text: Text to analyze
+            
+        Returns:
+            Confidence score between 0 and 1
+        """
+        try:
+            if not text or not category:
+                return 0.0
+                
+            text = self._preprocess_text(text)
+            
+            # Get keywords for the category
+            keywords = self.category_hierarchy.get(category, [])
+            if not keywords:
+                return 0.0
+                
+            # Count keyword matches
+            matches = sum(1 for keyword in keywords if keyword in text)
+            
+            # Calculate base confidence from keyword matches
+            base_confidence = min(1.0, matches / len(keywords))
+            
+            # Adjust confidence based on text analysis
+            if self.nlp:
+                doc = self.nlp(text)
+                
+                # Check for relevant entities
+                entity_boost = 0.1 * sum(1 for ent in doc.ents if any(
+                    keyword in ent.text.lower() for keyword in keywords
+                ))
+                
+                # Use TextBlob for sentiment analysis
+                blob = TextBlob(text)
+                sentiment_tuple = blob.sentiment
+                sentiment_score = float(sentiment_tuple[0])  # Access polarity directly from tuple
+                sentiment_factor = 1.0 + (0.1 * abs(sentiment_score))  # Boost for strong sentiment
+                
+                final_confidence = min(1.0, base_confidence * sentiment_factor + entity_boost)
+                return final_confidence
+                
+            return base_confidence
+            
+        except Exception as e:
+            logger.error(f"Error calculating category confidence: {str(e)}")
+            return 0.0 

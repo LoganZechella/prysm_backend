@@ -1,57 +1,123 @@
 import pytest
-import pandas as pd
-from unittest.mock import MagicMock, patch
-from typing import Dict, Any, List
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from app.database import Base
+from app.models import Event, UserPreferences
+import os
+
+# Test database URL
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/events_test")
+
+@pytest.fixture(scope="session")
+def engine():
+    """Create a test database engine."""
+    engine = create_engine(TEST_DATABASE_URL)
+    Base.metadata.create_all(engine)
+    yield engine
+    Base.metadata.drop_all(engine)
+
+@pytest.fixture(scope="session")
+def TestingSessionLocal(engine):
+    """Create a test database session factory."""
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    return SessionLocal
 
 @pytest.fixture
-def mock_aws():
-    """Mock AWS services."""
-    with patch("boto3.client") as mock_client:
-        yield mock_client
+def db_session(TestingSessionLocal):
+    """Create a test database session."""
+    session = TestingSessionLocal()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
 
 @pytest.fixture
-def sample_event_data() -> Dict[str, Any]:
-    """Sample event data for testing."""
-    return {
-        "id": "test-event-1",
-        "title": "Test Event",
-        "description": "A test event for unit testing",
-        "start_time": "2024-01-01T10:00:00",
-        "end_time": "2024-01-01T12:00:00",
-        "location": {
-            "venue": "Test Venue",
-            "address": "123 Test St",
-            "city": "Test City",
-            "state": "TS",
-            "country": "Test Country",
-            "coordinates": {"lat": 37.7749, "lon": -122.4194}
+def sample_events(db_session):
+    """Create sample events for testing."""
+    from datetime import datetime, timedelta
+    
+    now = datetime.utcnow()
+    events = [
+        Event(
+            title="Rock Concert in the Park",
+            description="Live rock music festival featuring local bands",
+            categories=["music", "entertainment", "outdoor"],
+            start_time=now + timedelta(days=3),
+            end_time=now + timedelta(days=3, hours=4),
+            location={"lat": 40.7128, "lng": -74.0060},  # NYC
+            price_info={
+                "type": "fixed",
+                "amount": 50.0,
+                "currency": "USD"
+            },
+            source="eventbrite",
+            source_id="evt_123",
+            url="https://example.com/event1",
+            view_count=500
+        ),
+        Event(
+            title="Tech Conference 2024",
+            description="Annual technology conference with workshops",
+            categories=["technology", "education", "networking"],
+            start_time=now + timedelta(days=10),
+            end_time=now + timedelta(days=12),
+            location={"lat": 37.7749, "lng": -122.4194},  # SF
+            price_info={
+                "type": "range",
+                "min_amount": 200.0,
+                "max_amount": 500.0,
+                "currency": "USD"
+            },
+            source="eventbrite",
+            source_id="evt_456",
+            url="https://example.com/event2",
+            view_count=1000
+        ),
+        Event(
+            title="Free Yoga in the Park",
+            description="Morning yoga session for all levels",
+            categories=["wellness", "outdoor"],
+            start_time=now + timedelta(days=1),
+            end_time=now + timedelta(days=1, hours=2),
+            location={"lat": 40.7829, "lng": -73.9654},  # Central Park
+            price_info={
+                "type": "fixed",
+                "amount": 0.0,
+                "currency": "USD"
+            },
+            source="eventbrite",
+            source_id="evt_789",
+            url="https://example.com/event3",
+            view_count=100
+        )
+    ]
+    
+    for event in events:
+        db_session.add(event)
+    db_session.commit()
+    
+    return events
+
+@pytest.fixture
+def sample_preferences(db_session):
+    """Create sample user preferences for testing."""
+    preferences = UserPreferences(
+        user_id="test_user",
+        preferred_categories=["music", "outdoor"],
+        excluded_categories=["technology"],
+        min_price=0.0,
+        max_price=100.0,
+        preferred_location={
+            "lat": 40.7128,
+            "lng": -74.0060,
+            "max_distance_km": 50
         },
-        "categories": ["test", "event"],
-        "price_info": {
-            "min_price": 10.0,
-            "max_price": 20.0,
-            "currency": "USD"
-        },
-        "source_info": {
-            "platform": "test",
-            "url": "https://test.com/event-1"
-        }
-    }
-
-@pytest.fixture
-def sample_trends_data() -> pd.DataFrame:
-    """Sample trends data for testing."""
-    return pd.DataFrame({
-        "date": ["2024-01-01", "2024-01-02", "2024-01-03"],
-        "category": ["music", "sports", "arts"],
-        "searches": [100, 200, 150]
-    })
-
-@pytest.fixture
-def mock_storage_manager():
-    """Mock storage manager for testing."""
-    mock = MagicMock()
-    mock.get_events.return_value = []
-    mock.get_user_preferences.return_value = None
-    mock.get_cache.return_value = None
-    return mock 
+        preferred_days=["Monday", "Friday", "Saturday"],
+        preferred_times=["morning", "evening"]
+    )
+    
+    db_session.add(preferences)
+    db_session.commit()
+    
+    return preferences 

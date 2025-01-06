@@ -41,6 +41,7 @@ ENV/
 *.sublime-project
 master_plan.txt
 summary_of_work.txt
+alpha_version_spec.txt
 
 # Jupyter Notebook
 .ipynb_checkpoints
