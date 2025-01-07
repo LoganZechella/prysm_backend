@@ -7,12 +7,12 @@ from app.scrapers.base import BaseScraper
 
 logger = logging.getLogger(__name__)
 
-class StubhubScrapflyScraper(BaseScraper):
-    """Scraper for StubHub using Scrapfly"""
+class FacebookScrapflyScraper(BaseScraper):
+    """Scraper for Facebook using Scrapfly"""
     
     def __init__(self, scrapfly_key: str):
         """Initialize the scraper with Scrapfly API key"""
-        super().__init__("stubhub")
+        super().__init__("facebook")
         self.scrapfly_key = scrapfly_key
     
     async def scrape_events(
@@ -20,26 +20,25 @@ class StubhubScrapflyScraper(BaseScraper):
         location: Dict[str, Any],
         date_range: Dict[str, datetime]
     ) -> List[Dict[str, Any]]:
-        """Scrape events from StubHub for a given location and date range"""
+        """Scrape events from Facebook for a given location and date range"""
         try:
             # Construct search URL
             city = location['city'].replace(' ', '+').lower()
             state = location['state'].lower()
-            base_url = f"https://www.stubhub.com/find/s/?q={city}+{state}&sort=date%2Casc&dateLocal={date_range['start'].strftime('%Y-%m-%d')}"
+            base_url = f"https://www.facebook.com/events/search/?q={city}+{state}"
             
             # Configure Scrapfly request
             config = ScrapeConfig(
                 url=base_url,
                 asp=True,  # Enable anti-scraping protection
-                country="US",
-                render_js=True  # Enable JavaScript rendering
+                country="US"
             )
             
             # Make request
             result = await self.client.async_scrape(config)
             
             if not result.success:
-                logger.error(f"Failed to scrape StubHub: {result.error}")
+                logger.error(f"Failed to scrape Facebook: {result.error}")
                 return []
             
             # Parse response
@@ -47,7 +46,7 @@ class StubhubScrapflyScraper(BaseScraper):
             events = []
             
             # Extract events
-            event_cards = soup.find_all('div', {'class': 'EventItem'})
+            event_cards = soup.find_all('div', {'class': 'event-card'})
             
             for card in event_cards:
                 try:
@@ -82,7 +81,7 @@ class StubhubScrapflyScraper(BaseScraper):
             return events
             
         except Exception as e:
-            logger.error(f"Error scraping StubHub: {str(e)}")
+            logger.error(f"Error scraping Facebook: {str(e)}")
             return []
     
     async def get_event_details(self, event_url: str) -> Dict[str, Any]:
@@ -114,23 +113,23 @@ class StubhubScrapflyScraper(BaseScraper):
     
     def _extract_title(self, card) -> str:
         """Extract event title"""
-        title_elem = card.find('h3', {'class': 'EventItem__Title'})
+        title_elem = card.find('h2', {'class': 'event-title'})
         return title_elem.text.strip() if title_elem else ""
     
     def _extract_description(self, card) -> str:
         """Extract event description"""
-        desc_elem = card.find('div', {'class': 'EventItem__Description'})
+        desc_elem = card.find('div', {'class': 'event-description'})
         return desc_elem.text.strip() if desc_elem else ""
     
     def _extract_datetime(self, card) -> datetime:
         """Extract event datetime"""
         try:
-            date_elem = card.find('time', {'class': 'EventItem__DateTime'})
+            date_elem = card.find('time', {'class': 'event-time'})
             if date_elem and date_elem.get('datetime'):
                 return datetime.fromisoformat(date_elem['datetime'].replace('Z', '+00:00'))
             
             # Try alternative selectors
-            date_elem = card.find('time', {'data-testid': 'event-date'})
+            date_elem = card.find('time', {'data-testid': 'event-time'})
             if date_elem and date_elem.get('datetime'):
                 return datetime.fromisoformat(date_elem['datetime'].replace('Z', '+00:00'))
             
@@ -142,24 +141,26 @@ class StubhubScrapflyScraper(BaseScraper):
     
     def _extract_venue_name(self, card) -> str:
         """Extract venue name"""
-        venue_elem = card.find('div', {'class': 'EventItem__Venue'})
+        venue_elem = card.find('div', {'class': 'event-venue'})
         return venue_elem.text.strip() if venue_elem else ""
     
     def _extract_venue_address(self, card) -> str:
         """Extract venue address"""
-        addr_elem = card.find('div', {'class': 'EventItem__Address'})
+        addr_elem = card.find('div', {'class': 'event-location'})
         return addr_elem.text.strip() if addr_elem else ""
     
     def _extract_categories(self, card) -> List[str]:
         """Extract event categories"""
-        cat_elem = card.find('div', {'class': 'EventItem__Category'})
+        cat_elem = card.find('div', {'class': 'event-category'})
         return [cat_elem.text.strip()] if cat_elem else []
     
     def _extract_price_info(self, card) -> Dict[str, Any]:
         """Extract price information"""
-        price_elem = card.find('div', {'class': 'EventItem__Price'})
+        price_elem = card.find('div', {'class': 'event-price'})
         if price_elem:
             price_text = price_elem.text.strip()
+            if 'free' in price_text.lower():
+                return {'is_free': True}
             try:
                 price = float(price_text.replace('$', '').split()[0])
                 return {
@@ -173,17 +174,17 @@ class StubhubScrapflyScraper(BaseScraper):
     
     def _extract_images(self, card) -> List[str]:
         """Extract event images"""
-        img_elem = card.find('img', {'class': 'EventItem__Image'})
+        img_elem = card.find('img', {'class': 'event-image'})
         return [img_elem['src']] if img_elem and img_elem.get('src') else []
     
     def _extract_tags(self, card) -> List[str]:
         """Extract event tags"""
-        tag_elems = card.find_all('div', {'class': 'EventItem__Tag'})
+        tag_elems = card.find_all('div', {'class': 'event-tag'})
         return [tag.text.strip() for tag in tag_elems]
     
     def _extract_url(self, card) -> str:
         """Extract event URL"""
-        link = card.find('a', {'class': 'EventItem__Link'})
+        link = card.find('a', {'class': 'event-link'})
         return link['href'] if link else ""
     
     def _extract_event_id(self, card) -> str:
@@ -193,23 +194,24 @@ class StubhubScrapflyScraper(BaseScraper):
     
     def _extract_full_description(self, soup) -> str:
         """Extract full event description from details page"""
-        desc_elem = soup.find('div', {'class': 'EventDetails__Description'})
+        desc_elem = soup.find('div', {'class': 'event-info-description'})
         return desc_elem.text.strip() if desc_elem else ""
     
     def _extract_end_datetime(self, soup) -> datetime:
         """Extract event end datetime from details page"""
-        end_elem = soup.find('time', {'class': 'EventDetails__EndTime'})
+        end_elem = soup.find('time', {'class': 'event-time-end'})
         if end_elem and end_elem.get('datetime'):
             return datetime.fromisoformat(end_elem['datetime'].replace('Z', '+00:00'))
         return None
     
     def _extract_organizer(self, soup) -> Dict[str, Any]:
         """Extract organizer information from details page"""
-        org_elem = soup.find('div', {'class': 'EventDetails__Organizer'})
+        org_elem = soup.find('div', {'class': 'event-host'})
         if org_elem:
-            name_elem = org_elem.find('h3', {'class': 'EventDetails__OrganizerName'})
+            name_elem = org_elem.find('h3', {'class': 'host-name'})
+            desc_elem = org_elem.find('div', {'class': 'host-description'})
             return {
                 'name': name_elem.text.strip() if name_elem else "",
-                'description': ""  # Add organizer description if available
+                'description': desc_elem.text.strip() if desc_elem else ""
             }
         return {} 

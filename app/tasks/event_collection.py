@@ -2,7 +2,6 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
-from app.database import SessionLocal
 from app.services.event_collection import EventCollectionService
 import os
 
@@ -11,21 +10,24 @@ logger = logging.getLogger(__name__)
 # Default locations to collect events from
 DEFAULT_LOCATIONS = [
     {
-        'name': 'San Francisco',
-        'lat': 37.7749,
-        'lng': -122.4194,
+        'city': 'San Francisco',
+        'state': 'California',
+        'latitude': 37.7749,
+        'longitude': -122.4194,
         'radius': 10  # km
     },
     {
-        'name': 'New York',
-        'lat': 40.7128,
-        'lng': -74.0060,
+        'city': 'New York',
+        'state': 'New York',
+        'latitude': 40.7128,
+        'longitude': -74.0060,
         'radius': 10
     },
     {
-        'name': 'Los Angeles',
-        'lat': 34.0522,
-        'lng': -118.2437,
+        'city': 'Los Angeles',
+        'state': 'California',
+        'latitude': 34.0522,
+        'longitude': -118.2437,
         'radius': 10
     }
 ]
@@ -59,9 +61,6 @@ class EventCollectionTask:
         self.running = True
         while self.running:
             try:
-                # Create database session
-                db = SessionLocal()
-                
                 # Set date range for next 30 days
                 date_range = {
                     'start': datetime.utcnow(),
@@ -70,7 +69,6 @@ class EventCollectionTask:
                 
                 # Collect events
                 new_events = await self.service.collect_events(
-                    db=db,
                     locations=self.locations,
                     date_range=date_range
                 )
@@ -83,9 +81,6 @@ class EventCollectionTask:
             except Exception as e:
                 logger.error(f"Error in event collection task: {str(e)}")
                 await asyncio.sleep(300)  # Wait 5 minutes before retry
-                
-            finally:
-                db.close()
     
     async def stop(self):
         """Stop the event collection task"""
