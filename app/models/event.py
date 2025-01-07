@@ -1,69 +1,29 @@
-from sqlalchemy import Column, String, DateTime, Float, JSON, Integer
-from sqlalchemy.dialects.postgresql import JSONB, ARRAY
-from app.database import Base
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Float
+from sqlalchemy.sql import func
+from app.db.session import Base
 
 class Event(Base):
-    """SQLAlchemy model for events."""
-    
+    """Event model for storing scraped events"""
     __tablename__ = "events"
-    
-    id = Column(Integer, primary_key=True)
+
+    id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)
-    description = Column(String, nullable=False)
+    description = Column(String)
     start_time = Column(DateTime, nullable=False)
-    end_time = Column(DateTime, nullable=True)
-    location = Column(JSONB, nullable=False)  # Dict with lat/lng
-    categories = Column(ARRAY(String), nullable=False)
-    price_info = Column(JSONB, nullable=True)  # Dict with price details
-    source = Column(String, nullable=False)  # Source platform (e.g., "eventbrite")
-    source_id = Column(String, nullable=False, unique=True)  # Original ID from source
-    url = Column(String, nullable=True)  # Link to original event
-    image_url = Column(String, nullable=True)
-    venue = Column(JSONB, nullable=True)  # Venue details
-    organizer = Column(JSONB, nullable=True)  # Organizer details
-    tags = Column(ARRAY(String), nullable=True)
-    view_count = Column(Integer, default=0)
-    like_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert model to dictionary."""
-        return {
-            'id': self.id,
-            'title': self.title,
-            'description': self.description,
-            'start_time': self.start_time.isoformat() if getattr(self, 'start_time', None) else None,
-            'end_time': self.end_time.isoformat() if getattr(self, 'end_time', None) else None,
-            'location': self.location,
-            'categories': self.categories,
-            'price_info': self.price_info,
-            'source': self.source,
-            'source_id': self.source_id,
-            'url': self.url,
-            'image_url': self.image_url,
-            'venue': self.venue,
-            'organizer': self.organizer,
-            'tags': self.tags,
-            'view_count': self.view_count,
-            'like_count': self.like_count,
-            'created_at': self.created_at.isoformat() if getattr(self, 'created_at', None) else None,
-            'updated_at': self.updated_at.isoformat() if getattr(self, 'updated_at', None) else None
-        }
-        
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'Event':
-        """Create an Event instance from a dictionary."""
-        # Convert ISO format strings to datetime objects
-        for field in ['start_time', 'end_time', 'created_at', 'updated_at']:
-            if isinstance(data.get(field), str):
-                data[field] = datetime.fromisoformat(data[field])
-                
-        return cls(**data)
-        
-    def __init__(self, **kwargs):
-        """Initialize an Event instance."""
-        for key, value in kwargs.items():
-            setattr(self, key, value) 
+    end_time = Column(DateTime)
+    location = Column(JSON)  # {lat: float, lng: float}
+    categories = Column(JSON)  # List of strings
+    price_info = Column(JSON)  # {currency: str, min_price: float, max_price: float, price_tier: str}
+    source = Column(String, nullable=False)  # Platform name (e.g., 'eventbrite', 'meetup', etc.)
+    source_id = Column(String, nullable=False)  # Original ID from the source platform
+    url = Column(String, nullable=False)  # Event URL
+    image_url = Column(String)  # Main event image URL
+    venue = Column(JSON)  # {name: str, address: str}
+    organizer = Column(JSON)  # {name: str, description: str}
+    tags = Column(JSON)  # List of strings
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    popularity_score = Column(Float, default=0.5)  # Score between 0 and 1
+
+    class Config:
+        orm_mode = True 
