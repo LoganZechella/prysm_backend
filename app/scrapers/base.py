@@ -21,6 +21,7 @@ from app.utils.rate_limiter import RateLimiter
 from app.utils.retry_handler import RetryHandler
 from app.utils.monitoring import ScraperMonitor
 from app.utils.circuit_breaker import CircuitBreaker, CircuitBreakerError
+from app.utils.scraper_config import ScraperConfig
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +39,6 @@ class ScrapflyResponseError(ScrapflyError):
 
 class ScrapflyBaseScraper:
     """Base class for Scrapfly-based scrapers"""
-    
-    # Default Scrapfly configuration
-    DEFAULT_CONFIG = {
-        'country': 'US',
-        'asp': True,
-        'render_js': True,
-        'proxy_pool': 'public',
-        'session': True,
-        'timeout': 60
-    }
     
     def __init__(
         self,
@@ -73,6 +64,7 @@ class ScrapflyBaseScraper:
         """
         self.api_key = api_key
         self.session = None
+        self.platform = None  # Must be set by subclasses
         
         # Initialize utilities
         self.rate_limiter = RateLimiter(
@@ -129,6 +121,38 @@ class ScrapflyBaseScraper:
             
         return False
         
+    def _get_request_config(self, url: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Get request configuration for the current platform.
+        
+        Args:
+            url: Target URL to scrape
+            config: Optional configuration overrides
+            
+        Returns:
+            Complete request configuration
+        """
+        if not self.platform:
+            raise ValueError("Platform must be set by subclass")
+            
+        # Get platform-specific configuration
+        platform_config = ScraperConfig.get_config(self.platform)
+        proxy_config = ScraperConfig.get_proxy_config(self.platform)
+        
+        # Merge configurations in order of precedence
+        request_config = {
+            **platform_config,
+            **proxy_config,
+            'api_key': self.api_key,
+            'url': url
+        }
+        
+        # Apply any custom overrides
+        if config:
+            request_config.update(config)
+            
+        return request_config
+        
     async def _make_request(
         self,
         url: str,
@@ -153,24 +177,13 @@ class ScrapflyBaseScraper:
         try:
             async def execute_request():
                 await self._init_session()
-                
-                # Merge default config with overrides
-                request_config = self.DEFAULT_CONFIG.copy()
-                if config:
-                    request_config.update(config)
-                    
-                # Prepare request parameters
-                params = {
-                    'api_key': self.api_key,
-                    'url': url,
-                    **request_config
-                }
+                request_config = self._get_request_config(url, config)
                 
                 # Acquire rate limit token
                 async with self.rate_limiter:
                     async with self.session.get(
                         'https://api.scrapfly.io/scrape',
-                        params=params
+                        params=request_config
                     ) as response:
                         # Handle error responses
                         if response.status == 429:
