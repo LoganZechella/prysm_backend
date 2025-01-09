@@ -45,8 +45,8 @@ airflow:
 # AI Services
 ai_services:
   openai:
-    model: "gpt-4"
-    max_tokens: 2000
+    model: "gpt-4o"
+    max_tokens: 4096
   google_nlp:
     language: "en"
 

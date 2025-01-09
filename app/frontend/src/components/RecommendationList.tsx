@@ -16,41 +16,7 @@ import {
 import api from '../utils/api'
 import { useNavigate } from 'react-router-dom'
 import { AxiosError } from 'axios'
-
-interface Event {
-  id: number
-  title: string
-  description: string
-  start_time: string
-  end_time: string | null
-  location: {
-    lat: number
-    lng: number
-  }
-  categories: string[]
-  price_info: {
-    min_price?: number
-    max_price?: number
-    currency?: string
-  } | null
-  source: string
-  source_id: string
-  url: string | null
-  image_url: string | null
-  venue: {
-    name: string
-    address: string
-  } | null
-  organizer: {
-    name: string
-    description?: string
-  } | null
-  tags: string[] | null
-  view_count: number
-  like_count: number
-  created_at: string
-  updated_at: string
-}
+import { Event } from '../types'
 
 interface RecommendationResponse {
   recommendations: {

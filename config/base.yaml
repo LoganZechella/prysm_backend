@@ -1,0 +1,37 @@
+gcp:
+  region: "us-central1"
+  zone: "us-central1-a"
+  raw_data_bucket: "prysm-raw-data"
+  processed_data_bucket: "prysm-processed-data"
+  dataset_id: "prysm_recommendations"
+
+api_scopes:
+  google:
+    - "https://www.googleapis.com/auth/calendar.readonly"
+    - "https://www.googleapis.com/auth/contacts.readonly"
+  spotify:
+    - "user-read-private"
+    - "user-read-email"
+  linkedin:
+    - "r_liteprofile"
+    - "r_emailaddress"
+
+database:
+  pool_size: 20
+  max_overflow: 10
+  pool_timeout: 30
+
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+
+auth:
+  jwt_secret_key: ""  # To be overridden in environment-specific configs
+  token_expiry: 3600  # 1 hour
+  refresh_token_expiry: 2592000  # 30 days
+
+api:
+  cors_origins: []  # To be overridden in environment-specific configs
+  rate_limit: 100
+  rate_limit_period: 60  # seconds 

@@ -1,0 +1,22 @@
+gcp:
+  project_id: "prysm-staging"
+
+database:
+  url: ""  # Set via environment variable PRYSM_DATABASE__URL
+  pool_size: 30
+  max_overflow: 15
+
+redis:
+  host: ""  # Set via environment variable PRYSM_REDIS__HOST
+
+auth:
+  jwt_secret_key: ""  # Set via environment variable PRYSM_AUTH__JWT_SECRET_KEY
+
+api:
+  cors_origins:
+    - "https://staging.prysm.com"
+  rate_limit: 500
+  rate_limit_period: 60
+
+debug: false
+log_level: "DEBUG" 

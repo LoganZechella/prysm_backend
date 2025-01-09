@@ -1,0 +1,20 @@
+gcp:
+  project_id: "prysm-dev"
+
+database:
+  url: "postgresql://postgres:postgres@localhost:5432/prysm_dev"
+
+redis:
+  host: "localhost"
+
+auth:
+  jwt_secret_key: "dev-secret-key-replace-in-production"
+
+api:
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://localhost:3001"
+    - "http://127.0.0.1:3000"
+
+debug: true
+log_level: "DEBUG" 

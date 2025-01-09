@@ -7,7 +7,6 @@ import {
   FormControl,
   FormLabel,
   Input,
-  Select,
   Checkbox,
   Button,
   SimpleGrid,
@@ -16,26 +15,9 @@ import {
   RangeSliderTrack,
   RangeSliderFilledTrack,
   RangeSliderThumb,
-  Text,
-  VStack,
 } from '@chakra-ui/react'
 import axios from 'axios'
-
-interface UserPreferences {
-  preferred_categories: string[]
-  excluded_categories: string[]
-  min_price: number
-  max_price: number
-  preferred_location: {
-    city: string
-    state: string
-    country: string
-    max_distance_km: number
-  }
-  preferred_days: string[]
-  preferred_times: string[]
-  min_rating: number
-}
+import { UserPreferences as IUserPreferences } from '../types'
 
 const DAYS_OF_WEEK = [
   'Monday', 'Tuesday', 'Wednesday', 'Thursday',
@@ -53,7 +35,7 @@ const AVAILABLE_CATEGORIES = [
 ]
 
 const UserPreferences = () => {
-  const [preferences, setPreferences] = useState<UserPreferences>({
+  const [preferences, setPreferences] = useState<IUserPreferences>({
     preferred_categories: [],
     excluded_categories: [],
     min_price: 0,

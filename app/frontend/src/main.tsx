@@ -1,7 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
-import './index.css'
+import './styles/index.css'
 import SuperTokens from "supertokens-auth-react"
 import Session from "supertokens-auth-react/recipe/session"
 import ThirdParty from "supertokens-auth-react/recipe/thirdparty"

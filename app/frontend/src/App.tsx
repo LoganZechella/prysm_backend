@@ -1,26 +1,36 @@
-import { ChakraProvider, extendTheme } from '@chakra-ui/react'
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
-import AuthDashboard from './components/AuthDashboard'
-import Callback from './components/Callback'
-import RecommendationList from './components/RecommendationList'
-import UserPreferences from './components/UserPreferences'
+import { ChakraProvider } from '@chakra-ui/react'
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { initSuperTokens } from '@/auth/config/supertokens'
+import AuthDashboard from '@/components/AuthDashboard'
+import Recommendations from '@/components/Recommendations'
+import OAuthCallback from '@/components/OAuthCallback'
+import { useAuth } from '@/auth/hooks/useAuth'
 
-const theme = extendTheme({
-  config: {
-    initialColorMode: 'light',
-    useSystemColorMode: false,
-  },
-})
+// Initialize SuperTokens
+initSuperTokens()
 
-function App() {
+const PrivateRoute = ({ children }: { children: React.ReactNode }) => {
+  const { isAuthenticated } = useAuth()
+  return isAuthenticated ? <>{children}</> : <Navigate to="/auth/dashboard" />
+}
+
+const App = () => {
   return (
-    <ChakraProvider theme={theme}>
+    <ChakraProvider>
       <Router>
         <Routes>
-          <Route path="/" element={<AuthDashboard />} />
-          <Route path="/recommendations" element={<RecommendationList />} />
-          <Route path="/preferences" element={<UserPreferences />} />
-          <Route path="/auth/:service/callback" element={<Callback />} />
+          <Route path="/auth/dashboard" element={<AuthDashboard />} />
+          <Route path="/auth/callback" element={<OAuthCallback />} />
+          <Route
+            path="/recommendations"
+            element={
+              <PrivateRoute>
+                <Recommendations />
+              </PrivateRoute>
+            }
+          />
+          <Route path="/" element={<Navigate to="/auth/dashboard" />} />
+          <Route path="*" element={<Navigate to="/auth/dashboard" />} />
         </Routes>
       </Router>
     </ChakraProvider>
