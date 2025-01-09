@@ -9,11 +9,16 @@ import {
   Container,
   Grid,
   Icon,
+  VStack,
+  FormControl,
+  FormLabel,
+  Input,
+  Divider,
 } from '@chakra-ui/react'
 import { FaSpotify, FaGoogle, FaLinkedin } from 'react-icons/fa'
 import { useNavigate } from 'react-router-dom'
-import { AxiosError } from 'axios'
-import api from '../utils/api'
+import { useAuth } from '@/auth/hooks/useAuth'
+import { Provider } from '@/auth/types/auth.types'
 
 interface AuthStatus {
   spotify: boolean
@@ -27,7 +32,13 @@ const AuthDashboard = () => {
     google: false,
     linkedin: false,
   })
-  const [isLoading, setIsLoading] = useState(true)
+  const [isLoading, setIsLoading] = useState(false)
+  const [isStatusLoading, setIsStatusLoading] = useState(false)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [isSignUp, setIsSignUp] = useState(false)
+
+  const { signIn, signUp, signInWithProvider, connectProvider, isAuthenticated, signOut } = useAuth()
   const toast = useToast()
   const navigate = useNavigate()
 
@@ -45,7 +56,6 @@ const AuthDashboard = () => {
         duration: 5000,
         isClosable: true,
       })
-      // Clear the error from URL
       navigate('/auth/dashboard', { replace: true })
     } else if (success) {
       toast({
@@ -54,95 +64,101 @@ const AuthDashboard = () => {
         duration: 3000,
         isClosable: true,
       })
-      // Clear the success from URL
       navigate('/auth/dashboard', { replace: true })
-      // Trigger an immediate status check
       checkAuthStatus()
     }
   }, [navigate, toast])
 
   const checkAuthStatus = async () => {
     try {
-      const response = await api.get('/auth/status')
-      setAuthStatus(response.data)
-      setIsLoading(false)
+      setIsStatusLoading(true)
+      const response = await fetch('/api/auth/status')
+      const data = await response.json()
+      setAuthStatus(data)
     } catch (error) {
       console.error('Error checking auth status:', error)
-      const axiosError = error as AxiosError
-      if (axiosError.response?.status !== 401) {  // Don't show toast for auth errors
+    } finally {
+      setIsStatusLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      checkAuthStatus()
+    } else {
+      setAuthStatus({
+        spotify: false,
+        google: false,
+        linkedin: false,
+      })
+    }
+  }, [isAuthenticated])
+
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault()
+    try {
+      setIsLoading(true)
+      const success = isSignUp 
+        ? await signUp(email, password)
+        : await signIn(email, password)
+
+      if (success) {
         toast({
-          title: 'Error checking auth status',
-          description: axiosError.message || 'Unknown error',
+          title: `${isSignUp ? 'Sign Up' : 'Sign In'} Successful`,
+          status: 'success',
+          duration: 3000,
+          isClosable: true,
+        })
+      } else {
+        toast({
+          title: `${isSignUp ? 'Sign Up' : 'Sign In'} Failed`,
           status: 'error',
           duration: 3000,
           isClosable: true,
         })
       }
-      setIsLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    const initSession = async () => {
-      try {
-        const response = await api.get('/auth/init-session')
-        if (response.data.token) {
-          localStorage.setItem('auth_token', response.data.token)
-        }
-      } catch (error) {
-        console.error('Error initializing session:', error)
-      }
-    }
-
-    initSession()
-    checkAuthStatus()
-    // Check status every 5 seconds
-    const interval = setInterval(checkAuthStatus, 5000)
-    return () => clearInterval(interval)
-  }, [])
-
-  const handleLogin = async (service: string) => {
-    try {
-      // Get current token from localStorage
-      const token = localStorage.getItem('auth_token');
-      if (!token) {
-        toast({
-          title: `Error connecting to ${service}`,
-          description: 'Please refresh the page and try again',
-          status: 'error',
-          duration: 3000,
-          isClosable: true,
-        });
-        return;
-      }
-
-      // Set up request with Authorization header
-      const response = await api.get(`/auth/${service}`, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
-
-      if (response.data.auth_url) {
-        window.location.href = response.data.auth_url;
-      }
     } catch (error) {
-      console.error(`Error initiating ${service} login:`, error);
       toast({
-        title: `Error connecting to ${service}`,
+        title: `${isSignUp ? 'Sign Up' : 'Sign In'} Error`,
         description: error instanceof Error ? error.message : 'Unknown error',
         status: 'error',
         duration: 3000,
         isClosable: true,
-      });
+      })
+    } finally {
+      setIsLoading(false)
     }
-  };
+  }
+
+  const handleProviderAuth = async (provider: Provider) => {
+    try {
+      setIsLoading(true)
+      if (isAuthenticated) {
+        await connectProvider(provider)
+      } else {
+        await signInWithProvider(provider)
+      }
+    } catch (error) {
+      toast({
+        title: 'Authentication Error',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        status: 'error',
+        duration: 3000,
+        isClosable: true,
+      })
+      setIsLoading(false)
+    }
+  }
 
   const handleLogout = async () => {
     try {
-      await api.post('/auth/logout')
-      localStorage.removeItem('auth_token')
-      await checkAuthStatus()
+      setIsLoading(true)
+      await signOut()
+      setAuthStatus({
+        spotify: false,
+        google: false,
+        linkedin: false,
+      })
       toast({
         title: 'Logged out successfully',
         status: 'success',
@@ -150,7 +166,6 @@ const AuthDashboard = () => {
         isClosable: true,
       })
     } catch (error) {
-      console.error('Error logging out:', error)
       toast({
         title: 'Error logging out',
         description: error instanceof Error ? error.message : 'Unknown error',
@@ -158,46 +173,89 @@ const AuthDashboard = () => {
         duration: 3000,
         isClosable: true,
       })
+    } finally {
+      setIsLoading(false)
     }
   }
 
-  const ServiceCard = ({ service, icon, isAuthenticated }: { service: string; icon: any; isAuthenticated: boolean }) => (
+  const ServiceCard = ({ service, icon, isConnected }: { service: string; icon: any; isConnected: boolean }) => (
     <Box
       p={6}
       borderWidth={1}
       borderRadius="lg"
       boxShadow="sm"
-      bg={isAuthenticated ? 'green.50' : 'white'}
-      opacity={isLoading ? 0.7 : 1}
+      bg={isConnected ? 'green.50' : 'white'}
+      opacity={isStatusLoading ? 0.7 : 1}
       transition="all 0.2s"
     >
       <Stack direction="column" align="center" spacing={4}>
-        <Icon as={icon} boxSize={10} color={isAuthenticated ? 'green.500' : 'gray.500'} />
+        <Icon as={icon} boxSize={10} color={isConnected ? 'green.500' : 'gray.500'} />
         <Heading size="md" textTransform="capitalize">
           {service}
         </Heading>
-        <Text color={isAuthenticated ? 'green.500' : 'gray.500'}>
-          {isAuthenticated ? 'Connected' : 'Not Connected'}
+        <Text color={isConnected ? 'green.500' : 'gray.500'}>
+          {isConnected ? 'Connected' : 'Not Connected'}
         </Text>
         <Button
-          colorScheme={isAuthenticated ? 'red' : 'blue'}
-          onClick={() => (isAuthenticated ? handleLogout() : handleLogin(service))}
+          colorScheme={isConnected ? 'red' : 'blue'}
+          onClick={() => handleProviderAuth(service as Provider)}
           isLoading={isLoading}
-          loadingText="Checking..."
+          loadingText="Connecting..."
+          disabled={isStatusLoading}
         >
-          {isAuthenticated ? 'Disconnect' : 'Connect'}
+          {isConnected ? 'Disconnect' : 'Connect'}
         </Button>
       </Stack>
     </Box>
   )
 
-  const isAnyServiceConnected = Object.values(authStatus).some(status => status)
-
   return (
     <Container maxW="container.xl" py={10}>
       <Stack direction="column" spacing={8} align="center">
         <Heading>Authentication Dashboard</Heading>
-        <Text>Connect your accounts to enable personalized recommendations</Text>
+        
+        {!isAuthenticated ? (
+          <VStack spacing={4} w="100%" maxW="400px">
+            <form onSubmit={handleEmailAuth} style={{ width: '100%' }}>
+              <VStack spacing={4}>
+                <FormControl>
+                  <FormLabel>Email</FormLabel>
+                  <Input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                  />
+                </FormControl>
+                <FormControl>
+                  <FormLabel>Password</FormLabel>
+                  <Input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                  />
+                </FormControl>
+                <Button 
+                  type="submit" 
+                  colorScheme="blue" 
+                  width="100%"
+                  isLoading={isLoading}
+                  loadingText={isSignUp ? "Signing Up..." : "Signing In..."}
+                >
+                  {isSignUp ? 'Sign Up' : 'Sign In'}
+                </Button>
+              </VStack>
+            </form>
+            <Button variant="link" onClick={() => setIsSignUp(!isSignUp)}>
+              {isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}
+            </Button>
+            <Divider />
+            <Text>Or connect with:</Text>
+          </VStack>
+        ) : (
+          <Text>Connect your accounts to enable personalized recommendations</Text>
+        )}
         
         <Grid
           templateColumns={{ base: '1fr', md: 'repeat(3, 1fr)' }}
@@ -207,21 +265,21 @@ const AuthDashboard = () => {
           <ServiceCard
             service="spotify"
             icon={FaSpotify}
-            isAuthenticated={authStatus.spotify}
+            isConnected={authStatus.spotify}
           />
           <ServiceCard
             service="google"
             icon={FaGoogle}
-            isAuthenticated={authStatus.google}
+            isConnected={authStatus.google}
           />
           <ServiceCard
             service="linkedin"
             icon={FaLinkedin}
-            isAuthenticated={authStatus.linkedin}
+            isConnected={authStatus.linkedin}
           />
         </Grid>
 
-        {isAnyServiceConnected && (
+        {isAuthenticated && (
           <Stack direction="column" spacing={4} align="center">
             <Button
               colorScheme="blue"

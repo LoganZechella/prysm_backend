@@ -89,3 +89,6 @@ coverage.xml
 # Misc
 .DS_Store
 Thumbs.db 
+
+# Local configuration overrides
+config/local.yaml 

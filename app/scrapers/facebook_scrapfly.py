@@ -1,217 +1,222 @@
-from typing import Dict, Any, List
-from datetime import datetime
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta
 import logging
 from bs4 import BeautifulSoup
-from scrapfly import ScrapeConfig, ScrapflyClient
-from app.scrapers.base import BaseScraper
+from .base import ScrapflyBaseScraper
+import json
 
 logger = logging.getLogger(__name__)
 
-class FacebookScrapflyScraper(BaseScraper):
-    """Scraper for Facebook using Scrapfly"""
-    
+class FacebookScrapflyScraper(ScrapflyBaseScraper):
     def __init__(self, scrapfly_key: str):
-        """Initialize the scraper with Scrapfly API key"""
-        super().__init__("facebook")
-        self.scrapfly_key = scrapfly_key
-    
+        super().__init__("facebook", scrapfly_key)
+        
     async def scrape_events(
         self,
         location: Dict[str, Any],
-        date_range: Dict[str, datetime]
+        date_range: Dict[str, datetime],
+        categories: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Scrape events from Facebook for a given location and date range"""
-        try:
-            # Construct search URL
-            city = location['city'].replace(' ', '+').lower()
-            state = location['state'].lower()
-            base_url = f"https://www.facebook.com/events/search/?q={city}+{state}"
-            
-            # Configure Scrapfly request
-            config = ScrapeConfig(
-                url=base_url,
-                asp=True,  # Enable anti-scraping protection
-                country="US"
-            )
-            
-            # Make request
-            result = await self.client.async_scrape(config)
-            
-            if not result.success:
-                logger.error(f"Failed to scrape Facebook: {result.error}")
-                return []
-            
-            # Parse response
-            soup = BeautifulSoup(result.content, 'html.parser')
-            events = []
-            
-            # Extract events
-            event_cards = soup.find_all('div', {'class': 'event-card'})
-            
-            for card in event_cards:
-                try:
-                    event_data = {
-                        'title': self._extract_title(card),
-                        'description': self._extract_description(card),
-                        'start_datetime': self._extract_datetime(card),
-                        'end_datetime': None,  # Will be populated in get_event_details
-                        'location': {
-                            'coordinates': {
-                                'lat': location['lat'],
-                                'lng': location['lng']
-                            },
-                            'venue_name': self._extract_venue_name(card),
-                            'address': self._extract_venue_address(card)
-                        },
-                        'categories': self._extract_categories(card),
-                        'price_info': self._extract_price_info(card),
-                        'images': self._extract_images(card),
-                        'tags': self._extract_tags(card),
-                        'source': {
-                            'platform': self.platform,
-                            'url': self._extract_url(card)
-                        },
-                        'event_id': self._extract_event_id(card)
-                    }
-                    events.append(event_data)
-                except Exception as e:
-                    logger.error(f"Error extracting event data: {str(e)}")
-                    continue
-            
-            return events
-            
-        except Exception as e:
-            logger.error(f"Error scraping Facebook: {str(e)}")
+        """Scrape events from Facebook"""
+        city = location['city'].replace(' ', '%20').lower()
+        state = location['state'].lower()
+        url = f"https://www.facebook.com/events/search/?q={city}%2C%20{state}"
+        
+        # Facebook-specific headers to appear more like a real browser
+        headers = {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'DNT': '1'
+        }
+        
+        # Facebook requires JavaScript rendering and often needs residential proxies
+        soup = await self._make_scrapfly_request(
+            url,
+            render_js=True,
+            proxy_pool="residential",
+            retry_attempts=5,  # Facebook can be more challenging to scrape
+            wait_for_selector='div[role="article"]',  # Wait for event cards to load
+            rendering_wait=5000,  # Wait 5s for dynamic content
+            headers=headers,
+            asp=True,  # Enable anti-scraping protection
+            cache=True,  # Cache results during development
+            debug=True  # Enable detailed logs
+        )
+        
+        if not soup:
             return []
-    
-    async def get_event_details(self, event_url: str) -> Dict[str, Any]:
-        """Get detailed information for a specific event"""
-        try:
-            config = ScrapeConfig(
-                url=event_url,
-                asp=True,
-                country="US"
-            )
             
-            result = await self.client.async_scrape(config)
-            
-            if not result.success:
-                logger.error(f"Failed to get event details: {result.error}")
-                return {}
-            
-            soup = BeautifulSoup(result.content, 'html.parser')
-            
-            return {
-                'description': self._extract_full_description(soup),
-                'end_datetime': self._extract_end_datetime(soup),
-                'organizer': self._extract_organizer(soup)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting event details: {str(e)}")
-            return {}
-    
-    def _extract_title(self, card) -> str:
-        """Extract event title"""
-        title_elem = card.find('h2', {'class': 'event-title'})
-        return title_elem.text.strip() if title_elem else ""
-    
-    def _extract_description(self, card) -> str:
-        """Extract event description"""
-        desc_elem = card.find('div', {'class': 'event-description'})
-        return desc_elem.text.strip() if desc_elem else ""
-    
-    def _extract_datetime(self, card) -> datetime:
-        """Extract event datetime"""
-        try:
-            date_elem = card.find('time', {'class': 'event-time'})
-            if date_elem and date_elem.get('datetime'):
-                return datetime.fromisoformat(date_elem['datetime'].replace('Z', '+00:00'))
-            
-            # Try alternative selectors
-            date_elem = card.find('time', {'data-testid': 'event-time'})
-            if date_elem and date_elem.get('datetime'):
-                return datetime.fromisoformat(date_elem['datetime'].replace('Z', '+00:00'))
-            
-            # If no datetime found, use a default future date
-            return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        except Exception as e:
-            logger.error(f"Error extracting datetime: {str(e)}")
-            return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    def _extract_venue_name(self, card) -> str:
-        """Extract venue name"""
-        venue_elem = card.find('div', {'class': 'event-venue'})
-        return venue_elem.text.strip() if venue_elem else ""
-    
-    def _extract_venue_address(self, card) -> str:
-        """Extract venue address"""
-        addr_elem = card.find('div', {'class': 'event-location'})
-        return addr_elem.text.strip() if addr_elem else ""
-    
-    def _extract_categories(self, card) -> List[str]:
-        """Extract event categories"""
-        cat_elem = card.find('div', {'class': 'event-category'})
-        return [cat_elem.text.strip()] if cat_elem else []
-    
-    def _extract_price_info(self, card) -> Dict[str, Any]:
-        """Extract price information"""
-        price_elem = card.find('div', {'class': 'event-price'})
-        if price_elem:
-            price_text = price_elem.text.strip()
-            if 'free' in price_text.lower():
-                return {'is_free': True}
+        events = []
+        event_cards = soup.find_all('div', {'role': 'article'})
+        
+        for card in event_cards:
             try:
-                price = float(price_text.replace('$', '').split()[0])
-                return {
-                    'is_free': False,
-                    'currency': 'USD',
-                    'amount': price
-                }
-            except (ValueError, IndexError):
-                pass
-        return {}
-    
-    def _extract_images(self, card) -> List[str]:
-        """Extract event images"""
-        img_elem = card.find('img', {'class': 'event-image'})
-        return [img_elem['src']] if img_elem and img_elem.get('src') else []
-    
-    def _extract_tags(self, card) -> List[str]:
-        """Extract event tags"""
-        tag_elems = card.find_all('div', {'class': 'event-tag'})
-        return [tag.text.strip() for tag in tag_elems]
-    
-    def _extract_url(self, card) -> str:
-        """Extract event URL"""
-        link = card.find('a', {'class': 'event-link'})
-        return link['href'] if link else ""
-    
-    def _extract_event_id(self, card) -> str:
-        """Extract event ID from URL"""
-        url = self._extract_url(card)
-        return url.split('/')[-1] if url else ""
-    
-    def _extract_full_description(self, soup) -> str:
-        """Extract full event description from details page"""
-        desc_elem = soup.find('div', {'class': 'event-info-description'})
-        return desc_elem.text.strip() if desc_elem else ""
-    
-    def _extract_end_datetime(self, soup) -> datetime:
-        """Extract event end datetime from details page"""
-        end_elem = soup.find('time', {'class': 'event-time-end'})
-        if end_elem and end_elem.get('datetime'):
-            return datetime.fromisoformat(end_elem['datetime'].replace('Z', '+00:00'))
-        return None
-    
-    def _extract_organizer(self, soup) -> Dict[str, Any]:
-        """Extract organizer information from details page"""
-        org_elem = soup.find('div', {'class': 'event-host'})
-        if org_elem:
-            name_elem = org_elem.find('h3', {'class': 'host-name'})
-            desc_elem = org_elem.find('div', {'class': 'host-description'})
-            return {
-                'name': name_elem.text.strip() if name_elem else "",
-                'description': desc_elem.text.strip() if desc_elem else ""
+                event_data = self._parse_facebook_card(card, location)
+                if event_data and self._matches_filters(event_data, date_range, categories):
+                    events.append(event_data)
+            except Exception as e:
+                logger.error(f"Error parsing Facebook event card: {str(e)}")
+                continue
+                
+        return events
+        
+    def _parse_facebook_card(self, card: BeautifulSoup, location: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Parse a Facebook event card into standardized format"""
+        try:
+            # Extract event data from JSON-LD if available
+            json_ld = card.find('script', {'type': 'application/ld+json'})
+            if json_ld:
+                data = json.loads(json_ld.string)
+                return self._parse_json_ld(data, location)
+            
+            # Fallback to HTML parsing if JSON-LD not available
+            title = card.find('h2').text.strip()
+            description = card.find('div', {'data-testid': 'event-description'})
+            description = description.text.strip() if description else ''
+            
+            # Extract date and time
+            date_elem = card.find('span', {'class': 'x4k7w5x'})  # Facebook's date class
+            start_time = self._parse_facebook_date(date_elem.text.strip()) if date_elem else None
+            
+            # Extract venue info
+            venue_elem = card.find('div', {'class': 'x1q0g3np'})  # Facebook's location class
+            venue = {
+                'name': venue_elem.find('span').text.strip() if venue_elem else '',
+                'address': venue_elem.find_all('span')[1].text.strip() if venue_elem and len(venue_elem.find_all('span')) > 1 else ''
             }
-        return {} 
+            
+            # Get event URL and image
+            url_elem = card.find('a', {'role': 'link', 'tabindex': '0'})
+            event_url = f"https://www.facebook.com{url_elem['href']}" if url_elem else None
+            
+            image_elem = card.find('img')
+            image_url = image_elem['src'] if image_elem else None
+            
+            return {
+                'title': title,
+                'description': description,
+                'start_time': start_time.isoformat() if start_time else None,
+                'end_time': None,
+                'location': {
+                    'lat': location.get('lat', 0),
+                    'lng': location.get('lng', 0)
+                },
+                'venue': venue,
+                'price_info': {
+                    'min_price': 0,  # Facebook events often don't show price in search
+                    'max_price': 0,
+                    'currency': 'USD'
+                },
+                'source': 'facebook',
+                'source_id': event_url.split('/')[-2] if event_url else None,
+                'url': event_url,
+                'categories': [],  # Would need to fetch event details to get categories
+                'tags': [],
+                'image_url': image_url,
+                'view_count': 0,
+                'like_count': 0,
+                'created_at': datetime.utcnow().isoformat(),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error parsing Facebook card: {str(e)}")
+            return None
+            
+    def _parse_json_ld(self, data: Dict[str, Any], location: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse event data from JSON-LD format"""
+        try:
+            return {
+                'title': data.get('name', ''),
+                'description': data.get('description', ''),
+                'start_time': data.get('startDate'),
+                'end_time': data.get('endDate'),
+                'location': {
+                    'lat': location.get('lat', 0),
+                    'lng': location.get('lng', 0)
+                },
+                'venue': {
+                    'name': data.get('location', {}).get('name', ''),
+                    'address': data.get('location', {}).get('address', {}).get('streetAddress', '')
+                },
+                'price_info': {
+                    'min_price': 0,
+                    'max_price': 0,
+                    'currency': 'USD'
+                },
+                'source': 'facebook',
+                'source_id': data.get('identifier', ''),
+                'url': data.get('url', ''),
+                'categories': [],
+                'tags': [],
+                'image_url': data.get('image', ''),
+                'view_count': 0,
+                'like_count': 0,
+                'created_at': datetime.utcnow().isoformat(),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+        except Exception as e:
+            logger.error(f"Error parsing JSON-LD data: {str(e)}")
+            return None
+            
+    def _parse_facebook_date(self, date_text: str) -> Optional[datetime]:
+        """Parse Facebook's date formats"""
+        try:
+            # Facebook uses various date formats, we'll handle common ones
+            formats = [
+                '%b %d, %Y at %I:%M %p',  # "Mar 15, 2024 at 7:00 PM"
+                '%B %d, %Y at %I:%M %p',  # "March 15, 2024 at 7:00 PM"
+                '%A, %B %d at %I:%M %p',  # "Friday, March 15 at 7:00 PM"
+                'Today at %I:%M %p',       # "Today at 7:00 PM"
+                'Tomorrow at %I:%M %p'     # "Tomorrow at 7:00 PM"
+            ]
+            
+            # Handle relative dates
+            if 'Today at' in date_text:
+                base_date = datetime.now()
+                time_str = date_text.split('at')[1].strip()
+                return datetime.strptime(f"{base_date.strftime('%Y-%m-%d')} {time_str}", '%Y-%m-%d %I:%M %p')
+                
+            if 'Tomorrow at' in date_text:
+                base_date = datetime.now()
+                time_str = date_text.split('at')[1].strip()
+                next_day = base_date + timedelta(days=1)
+                return datetime.strptime(f"{next_day.strftime('%Y-%m-%d')} {time_str}", '%Y-%m-%d %I:%M %p')
+            
+            # Try each format
+            for fmt in formats:
+                try:
+                    return datetime.strptime(date_text, fmt)
+                except ValueError:
+                    continue
+                    
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error parsing Facebook date '{date_text}': {str(e)}")
+            return None
+            
+    def _matches_filters(
+        self,
+        event: Dict[str, Any],
+        date_range: Dict[str, datetime],
+        categories: Optional[List[str]]
+    ) -> bool:
+        """Check if event matches the date range and category filters"""
+        # Check date range
+        if event['start_time']:
+            event_date = datetime.fromisoformat(event['start_time'].replace('Z', '+00:00'))
+            if event_date < date_range['start'] or event_date > date_range['end']:
+                return False
+                
+        # Check categories if specified
+        if categories and event['categories']:
+            if not any(cat in event['categories'] for cat in categories):
+                return False
+                
+        return True 

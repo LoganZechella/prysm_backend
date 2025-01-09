@@ -1,0 +1,42 @@
+env: "test"
+
+gcp:
+  project_id: "test-project"
+  region: "us-central1"
+  zone: "us-central1-a"
+  raw_data_bucket: "test-raw-data"
+  processed_data_bucket: "test-processed-data"
+  dataset_id: "test_dataset"
+
+api_scopes:
+  google:
+    - "https://www.googleapis.com/auth/calendar.readonly"
+  spotify:
+    - "user-read-private"
+  linkedin:
+    - "r_liteprofile"
+
+database:
+  url: "postgresql://test:test@localhost:5432/test_db"
+  pool_size: 20
+  max_overflow: 10
+  pool_timeout: 30
+
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+
+auth:
+  jwt_secret_key: "test-secret-key"
+  token_expiry: 3600
+  refresh_token_expiry: 2592000
+
+api:
+  cors_origins:
+    - "http://localhost:3000"
+  rate_limit: 100
+  rate_limit_period: 60
+
+debug: true
+log_level: "DEBUG" 
