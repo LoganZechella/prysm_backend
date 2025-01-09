@@ -6,6 +6,7 @@ import aiohttp
 import asyncio
 from bs4 import BeautifulSoup
 from scrapfly import ScrapeConfig, ScrapflyClient
+from app.utils.rate_limiter import RateLimiter
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -21,69 +22,80 @@ class ScrapflyBaseScraper(BaseScraper):
     def __init__(self, platform: str, scrapfly_key: str):
         super().__init__(platform)
         self.client = ScrapflyClient(key=scrapfly_key)
-        logger.setLevel(logging.DEBUG)  # Set log level to debug for development
         
-    async def _make_scrapfly_request(
-        self, 
-        url: str, 
-        render_js: bool = False,
-        country: str = "US",
-        proxy_pool: str = "public",
-        retry_attempts: int = 3,
-        wait_for_selector: Optional[str] = None,
-        rendering_wait: Optional[int] = None,
-        headers: Optional[Dict[str, str]] = None,
-        cookies: Optional[Dict[str, str]] = None,
-        asp: bool = True,
-        cache: bool = True,
-        cache_ttl: int = 3600,  # 1 hour cache by default
-        debug: bool = True
-    ) -> Optional[BeautifulSoup]:
-        """Common method for making Scrapfly requests with retries and error handling"""
-        for attempt in range(retry_attempts):
+        # Default configuration based on Scrapfly best practices
+        self.config = {
+            'render_js': True,  # Enable JS rendering by default
+            'proxy_pool': "residential",  # Better success rate with residential IPs
+            'retry_attempts': 4,
+            'wait_for_selector': 'body',  # Wait for page load
+            'rendering_wait': 3000,  # 3s wait for dynamic content
+            'cache': True,
+            'cache_ttl': 1800,  # 30 min cache
+            'country': 'US',
+            'asp': True,  # Enable Anti-Scraping Protection
+            'timeout': 60000,  # 60s timeout for ASP
+        }
+        
+        # Initialize rate limiter
+        self.rate_limiter = RateLimiter(rate_limit=10)
+
+    async def _make_request_with_retry(self, url: str, config: Dict[str, Any]) -> Optional[BeautifulSoup]:
+        """Make request with improved error handling based on Scrapfly docs"""
+        for attempt in range(config['retry_attempts']):
             try:
-                logger.debug(f"Making request to {url} (attempt {attempt + 1}/{retry_attempts})")
-                config = ScrapeConfig(
+                await self.rate_limiter.acquire()
+                
+                result = await self.client.async_scrape(ScrapeConfig(
                     url=url,
-                    # Anti-scraping protection bypass (recommended)
-                    asp=asp,
-                    # Proxy settings
-                    country=country,
-                    proxy_pool=proxy_pool,
-                    # JavaScript rendering settings
-                    render_js=render_js,
-                    wait_for_selector=wait_for_selector,
-                    rendering_wait=rendering_wait,
-                    # Cache settings (recommended when developing)
-                    cache=cache,
-                    cache_ttl=cache_ttl,
-                    # Debug mode for more details in dashboard
-                    debug=debug,
-                    # Request customization
-                    headers=headers,
-                    cookies=cookies
-                )
-                
-                result = await self.client.async_scrape(config)
-                
+                    **{k: v for k, v in config.items() 
+                       if k in ScrapeConfig.__annotations__}
+                ))
+
                 if not result.success:
-                    logger.error(f"Failed to scrape {self.platform} (attempt {attempt + 1}/{retry_attempts}): {result.error}")
-                    if attempt == retry_attempts - 1:
-                        return None
-                    continue
+                    error = result.error
+                    # Check if error is retryable based on Scrapfly error codes
+                    if error.get('retryable', False) and attempt < config['retry_attempts'] - 1:
+                        wait_time = (2 ** attempt) * 1  # Exponential backoff
+                        logger.info(f"Retryable error, waiting {wait_time}s: {error.get('description')}")
+                        await asyncio.sleep(wait_time)
+                        continue
                     
-                logger.debug(f"Successfully scraped {url}")
-                return BeautifulSoup(result.content, 'html.parser')
-                
-            except Exception as e:
-                logger.error(f"Error making Scrapfly request for {self.platform} (attempt {attempt + 1}/{retry_attempts}): {str(e)}")
-                if attempt == retry_attempts - 1:
+                    logger.error(f"Scrapfly error: {error.get('description')} (Code: {error.get('code')})")
                     return None
-                await asyncio.sleep(1)  # Wait before retrying
-                continue
-        
-        return None
+
+                return BeautifulSoup(result.content, 'html.parser')
+
+            except Exception as e:
+                logger.error(f"Request error: {str(e)}")
+                if attempt < config['retry_attempts'] - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return None
             
+    async def _make_scrapfly_request(self, url: str, **kwargs) -> Optional[BeautifulSoup]:
+        """Make a request using Scrapfly with retries and error handling"""
+        try:
+            await self.rate_limiter.acquire()
+            
+            config = {**self.config, **kwargs}
+            result = await self.client.async_scrape(ScrapeConfig(
+                url=url,
+                **{k: v for k, v in config.items() 
+                   if k in ScrapeConfig.__annotations__}
+            ))
+
+            if not result.success:
+                error = result.error
+                logger.error(f"Scrapfly error: {error.get('description')} (Code: {error.get('code')})")
+                return None
+
+            return BeautifulSoup(result.content, 'html.parser')
+
+        except Exception as e:
+            logger.error(f"Request error: {str(e)}")
+            return None
+
     @abstractmethod
     async def scrape_events(
         self,
@@ -102,3 +114,26 @@ class ScrapflyBaseScraper(BaseScraper):
             List of event dictionaries with standardized fields
         """
         pass 
+
+    async def _handle_scrapfly_error(self, error: Dict[str, Any]) -> bool:
+        """Handle specific Scrapfly error codes
+        Returns True if the error is retryable
+        """
+        error_code = error.get('code', '')
+        
+        if error_code == 'ERR::ASP::SHIELD_ERROR':
+            logger.error("ASP Shield error - will not retry")
+            return False
+            
+        if error_code == 'ERR::SCRAPE::OPERATION_TIMEOUT':
+            logger.warning("Timeout error - increasing timeout for next attempt")
+            self.config['timeout'] = min(90000, self.config['timeout'] * 1.5)
+            return True
+            
+        if error_code == 'ERR::THROTTLE::MAX_REQUEST_RATE_EXCEEDED':
+            logger.warning("Rate limit exceeded - adding delay")
+            await asyncio.sleep(5)
+            return True
+            
+        # Default to retryable for unknown errors
+        return True 

@@ -8,6 +8,8 @@ import os
 # Test database URL
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/events_test")
 
+pytest_plugins = ('pytest_asyncio',)
+
 @pytest.fixture(scope="session")
 def engine():
     """Create a test database engine."""
@@ -121,3 +123,11 @@ def sample_preferences(db_session):
     db_session.commit()
     
     return preferences 
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create an instance of the default event loop for each test case."""
+    import asyncio
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close() 
