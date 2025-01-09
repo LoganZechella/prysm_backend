@@ -207,3 +207,95 @@ async def test_eventbrite_card_parsing_with_dates(mock_eventbrite_html):
     assert event_data is not None
     assert 'start_time' in event_data
     assert isinstance(datetime.fromisoformat(event_data['start_time'].replace('Z', '+00:00')), datetime) 
+
+@pytest.mark.asyncio
+async def test_scrapfly_asp_error(mock_scrapfly_client):
+    """Test handling of ASP Shield errors"""
+    mock_result = MagicMock()
+    mock_result.success = False
+    mock_result.error = {
+        'code': 'ERR::ASP::SHIELD_ERROR',
+        'description': 'ASP Shield error occurred'
+    }
+    
+    mock_scrapfly_client.async_scrape = AsyncMock(return_value=mock_result)
+    
+    scraper = EventbriteScrapflyScraper("test_key")
+    scraper.client = mock_scrapfly_client
+    
+    # Should return None for non-retryable error
+    result = await scraper._make_request_with_retry("https://test.com", scraper.config)
+    assert result is None
+
+@pytest.mark.asyncio
+async def test_scrapfly_timeout_error(mock_scrapfly_client):
+    """Test handling of timeout errors with automatic timeout increase"""
+    mock_result = MagicMock()
+    mock_result.success = False
+    mock_result.error = {
+        'code': 'ERR::SCRAPE::OPERATION_TIMEOUT',
+        'description': 'Operation timed out'
+    }
+    
+    # First call times out, second succeeds
+    mock_scrapfly_client.async_scrape = AsyncMock(side_effect=[
+        mock_result,
+        MagicMock(success=True, content="<html></html>")
+    ])
+    
+    scraper = EventbriteScrapflyScraper("test_key")
+    scraper.client = mock_scrapfly_client
+    initial_timeout = scraper.config['timeout']
+    
+    await scraper._make_request_with_retry("https://test.com", scraper.config)
+    
+    # Verify timeout was increased
+    assert scraper.config['timeout'] > initial_timeout
+
+@pytest.mark.asyncio
+async def test_scrapfly_rate_limit_error(mock_scrapfly_client):
+    """Test handling of rate limit errors with additional delay"""
+    mock_result = MagicMock()
+    mock_result.success = False
+    mock_result.error = {
+        'code': 'ERR::THROTTLE::MAX_REQUEST_RATE_EXCEEDED',
+        'description': 'Rate limit exceeded'
+    }
+    
+    # Mock async_scrape to fail with rate limit first, then succeed
+    mock_scrapfly_client.async_scrape = AsyncMock(side_effect=[
+        mock_result,
+        MagicMock(success=True, content="<html></html>")
+    ])
+    
+    scraper = EventbriteScrapflyScraper("test_key")
+    scraper.client = mock_scrapfly_client
+    
+    start_time = datetime.now()
+    await scraper._make_request_with_retry("https://test.com", scraper.config)
+    duration = (datetime.now() - start_time).total_seconds()
+    
+    # Verify that extra delay was added (should be > 5 seconds)
+    assert duration >= 5
+
+@pytest.mark.asyncio
+async def test_max_retries_exceeded(mock_scrapfly_client):
+    """Test that scraper gives up after max retries"""
+    mock_result = MagicMock()
+    mock_result.success = False
+    mock_result.error = {
+        'code': 'ERR::SCRAPE::OPERATION_TIMEOUT',
+        'description': 'Operation timed out'
+    }
+    
+    # Make it fail consistently
+    mock_scrapfly_client.async_scrape = AsyncMock(return_value=mock_result)
+    
+    scraper = EventbriteScrapflyScraper("test_key")
+    scraper.client = mock_scrapfly_client
+    
+    result = await scraper._make_request_with_retry("https://test.com", {'retry_attempts': 3})
+    
+    # Should have given up after 3 attempts
+    assert mock_scrapfly_client.async_scrape.call_count == 3
+    assert result is None 
