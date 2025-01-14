@@ -21,12 +21,15 @@ wheels/
 *.egg
 .cache
 prysm-airflow-sa-key.json
+body.txt
+phase1-specs.md
 # Virtual Environment
 venv/
 env/
 ENV/
 .env
 .venv
+nlp_service_account_key.json
 
 # IDEs and editors
 .idea/
