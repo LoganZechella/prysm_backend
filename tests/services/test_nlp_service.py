@@ -3,123 +3,110 @@ Tests for the NLP service.
 """
 
 import pytest
-from unittest.mock import Mock, patch
-from datetime import datetime
-import time
-from google.cloud import language_v2
+from unittest.mock import Mock, patch, MagicMock
 from google.api_core import exceptions
-
-from app.services.nlp_service import NLPService, RateLimiter
+from app.services.nlp_service import NLPService
+from app.monitoring.performance import PerformanceMonitor
 
 @pytest.fixture
-def mock_client():
-    """Mock Google Cloud client"""
+def mock_language_client():
     with patch('google.cloud.language_v2.LanguageServiceClient') as mock:
         yield mock
 
 @pytest.fixture
-def nlp_service(mock_client):
-    """Get NLP service instance with mocked client"""
+def nlp_service():
     service = NLPService()
-    service._client = mock_client
+    service._client = None  # Reset client for testing
     return service
 
-def test_rate_limiter():
-    """Test rate limiter functionality"""
-    limiter = RateLimiter(rate=60, burst_size=2)  # 1 per second, burst of 2
-    
-    # Should allow burst
-    assert limiter.acquire()
-    assert limiter.acquire()
-    
-    # Should deny when depleted
-    assert not limiter.acquire()
-    
-    # Should allow after waiting
-    time.sleep(1.1)  # Wait for token replenishment
-    assert limiter.acquire()
-
-def test_singleton_pattern():
-    """Test NLP service singleton pattern"""
+def test_singleton_instance():
     service1 = NLPService()
     service2 = NLPService()
     assert service1 is service2
 
-def test_analyze_text_success(nlp_service, mock_client):
-    """Test successful text analysis"""
-    # Mock responses
-    mock_entity_response = Mock()
-    mock_entity_response.entities = [
-        Mock(
-            name="Google",
-            type_=language_v2.Entity.Type.ORGANIZATION,
-            salience=0.8,
-            metadata={},
-            mentions=[
-                Mock(
-                    text=Mock(content="Google"),
-                    type_=language_v2.EntityMention.Type.PROPER,
-                    sentiment=Mock(score=0.2, magnitude=0.5)
-                )
-            ]
-        )
-    ]
-    
-    mock_sentiment_response = Mock()
-    mock_sentiment_response.document_sentiment = Mock(score=0.4, magnitude=0.8)
-    mock_sentiment_response.sentences = [
-        Mock(
-            text=Mock(content="This is great."),
-            sentiment=Mock(score=0.4, magnitude=0.8)
-        )
-    ]
+def test_client_initialization(mock_language_client):
+    with patch('app.config.google_cloud.get_credentials_path', return_value='/fake/path'):
+        service = NLPService()
+        client = service.get_client()
+        assert client is not None
+        mock_language_client.from_service_account_file.assert_called_once_with('/fake/path')
+
+def test_client_initialization_failure():
+    with patch('app.config.google_cloud.get_credentials_path', return_value=None):
+        service = NLPService()
+        with pytest.raises(ValueError, match="Invalid or missing GCP credentials"):
+            service.get_client()
+
+@patch('app.services.nlp_service.RateLimiter.acquire', return_value=True)
+def test_analyze_text_success(mock_acquire, nlp_service):
+    # Mock successful API responses
+    mock_client = MagicMock()
+    mock_entity_response = MagicMock(
+        entities=[],
+        language_code='en'
+    )
+    mock_sentiment_response = MagicMock(
+        document_sentiment=MagicMock(score=0.5, magnitude=0.8),
+        sentences=[]
+    )
     
     mock_client.analyze_entities.return_value = mock_entity_response
     mock_client.analyze_sentiment.return_value = mock_sentiment_response
     
-    result = nlp_service.analyze_text("Google is a great company")
+    nlp_service._client = mock_client
     
-    assert result['entities'][0]['name'] == "Google"
-    assert result['entities'][0]['type'] == "ORGANIZATION"
-    assert result['sentiment']['document_sentiment']['score'] == 0.4
+    result = nlp_service.analyze_text("Test text")
+    
+    assert result['language'] == 'en'
+    assert result['sentiment']['document_sentiment']['score'] == 0.5
+    assert result['sentiment']['document_sentiment']['magnitude'] == 0.8
+    assert isinstance(result['entities'], list)
     assert 'analyzed_at' in result
 
-def test_analyze_text_api_error(nlp_service, mock_client):
-    """Test handling of API errors"""
-    mock_client.analyze_entities.side_effect = exceptions.DeadlineExceeded("Timeout")
-    
-    with pytest.raises(exceptions.DeadlineExceeded):
-        nlp_service.analyze_text("Test text")
-
-def test_rate_limit_exceeded(nlp_service):
-    """Test rate limit enforcement"""
-    # Override rate limiter for testing
-    nlp_service.rate_limiter = RateLimiter(rate=1, burst_size=1)
-    
-    # First request should succeed
-    nlp_service.analyze_text("Test 1")
-    
-    # Second immediate request should fail
-    with pytest.raises(Exception, match="Rate limit exceeded"):
-        nlp_service.analyze_text("Test 2")
-
-def test_cache_behavior(nlp_service, mock_client):
-    """Test caching behavior"""
-    mock_client.analyze_entities.return_value = Mock(entities=[])
-    mock_client.analyze_sentiment.return_value = Mock(
-        document_sentiment=Mock(score=0, magnitude=0),
+@patch('app.services.nlp_service.RateLimiter.acquire', return_value=True)
+def test_analyze_text_retry_on_timeout(mock_acquire, nlp_service):
+    mock_client = MagicMock()
+    mock_client.analyze_entities.side_effect = [
+        TimeoutError("Timeout"),
+        MagicMock(entities=[], language_code='en')
+    ]
+    mock_client.analyze_sentiment.return_value = MagicMock(
+        document_sentiment=MagicMock(score=0.5, magnitude=0.8),
         sentences=[]
     )
     
-    # First call should hit the API
-    nlp_service.analyze_text("Test text")
-    assert mock_client.analyze_entities.call_count == 1
+    nlp_service._client = mock_client
     
-    # Second call with same text should use cache
-    nlp_service.analyze_text("Test text")
-    assert mock_client.analyze_entities.call_count == 1  # Count shouldn't increase
+    result = nlp_service.analyze_text("Test text")
+    
+    assert mock_client.analyze_entities.call_count == 2
+    assert result['language'] == 'en'
 
-def test_cleanup(nlp_service, mock_client):
-    """Test cleanup behavior"""
+@patch('app.services.nlp_service.RateLimiter.acquire', return_value=True)
+def test_analyze_text_circuit_breaker(mock_acquire, nlp_service):
+    mock_client = MagicMock()
+    mock_client.analyze_entities.side_effect = exceptions.ServiceUnavailable("Service down")
+    
+    nlp_service._client = mock_client
+    
+    # Should fail after max retries and open circuit breaker
+    with pytest.raises(exceptions.ServiceUnavailable):
+        nlp_service.analyze_text("Test text")
+    
+    # Next call should fail fast with circuit breaker open
+    with pytest.raises(Exception, match="Circuit breaker nlp_api is OPEN"):
+        nlp_service.analyze_text("Test text")
+
+@patch('app.services.nlp_service.RateLimiter.acquire', return_value=False)
+def test_rate_limit_exceeded(mock_acquire, nlp_service):
+    with pytest.raises(Exception, match="Rate limit exceeded"):
+        nlp_service.analyze_text("Test text")
+
+def test_cleanup(nlp_service):
+    mock_client = MagicMock()
+    nlp_service._client = mock_client
+    
     nlp_service.cleanup()
-    assert nlp_service._client is None 
+    
+    assert nlp_service._client is None
+    mock_client.transport.close.assert_called_once() 

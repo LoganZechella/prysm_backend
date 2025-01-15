@@ -10,7 +10,7 @@ import logging
 from functools import lru_cache, wraps
 from google.cloud import language_v2
 from google.cloud.language_v2 import LanguageServiceClient
-from google.api_core import retry, exceptions
+from google.api_core import exceptions
 
 from app.config.google_cloud import (
     get_credentials_path,
@@ -18,12 +18,10 @@ from app.config.google_cloud import (
     NLP_REQUESTS_PER_MINUTE,
     NLP_BURST_SIZE,
     NLP_CACHE_TTL,
-    NLP_CACHE_MAX_SIZE,
-    NLP_MAX_RETRIES,
-    NLP_INITIAL_RETRY_DELAY,
-    NLP_MAX_RETRY_DELAY
+    NLP_CACHE_MAX_SIZE
 )
 from app.monitoring.performance import PerformanceMonitor
+from app.services.error_handling import with_retry, circuit_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +70,7 @@ class NLPService:
         self.performance_monitor = PerformanceMonitor()
         self.rate_limiter = RateLimiter(NLP_REQUESTS_PER_MINUTE, NLP_BURST_SIZE)
         
+    @circuit_breaker("nlp_client")
     def get_client(self) -> LanguageServiceClient:
         """Get or create the API client"""
         if self._client is None:
@@ -97,6 +96,19 @@ class NLPService:
     
     @_rate_limit_decorator
     @lru_cache(maxsize=NLP_CACHE_MAX_SIZE)
+    @with_retry(
+        max_retries=3,
+        initial_delay=1.0,
+        exponential_base=2.0,
+        exceptions=(
+            ConnectionError,
+            TimeoutError,
+            exceptions.DeadlineExceeded,
+            exceptions.ServiceUnavailable,
+            exceptions.ResourceExhausted
+        ),
+        circuit_breaker_name="nlp_api"
+    )
     def analyze_text(self, text: str) -> Dict[str, Any]:
         """
         Analyzes text using Google Cloud Natural Language API
@@ -116,25 +128,12 @@ class NLPService:
                 "type_": language_v2.Document.Type.PLAIN_TEXT
             }
             
-            # Configure retry behavior
-            retry_config = retry.Retry(
-                initial=NLP_INITIAL_RETRY_DELAY,
-                maximum=NLP_MAX_RETRY_DELAY,
-                multiplier=2.0,
-                predicate=retry.if_exception_type(
-                    ConnectionError,
-                    TimeoutError,
-                    exceptions.DeadlineExceeded
-                )
-            )
-            
             with self.performance_monitor.monitor_api_call('analyze_entities'):
                 entity_response = client.analyze_entities(
                     request={
                         "document": document,
                         "encoding_type": language_v2.EncodingType.UTF8
                     },
-                    retry=retry_config,
                     timeout=NLP_API_TIMEOUT
                 )
             
@@ -144,7 +143,6 @@ class NLPService:
                         "document": document,
                         "encoding_type": language_v2.EncodingType.UTF8
                     },
-                    retry=retry_config,
                     timeout=NLP_API_TIMEOUT
                 )
             
