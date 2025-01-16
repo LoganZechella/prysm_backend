@@ -1,120 +1,104 @@
-from google.cloud import storage
-from google.cloud.exceptions import NotFound
-import os
-import json
-from datetime import datetime
-from typing import Dict, Any, Optional, List
-import logging
-import asyncio
-from functools import partial
+"""Storage manager for coordinating between DynamoDB and S3."""
 
-logger = logging.getLogger(__name__)
+from typing import Dict, Any, List, Optional
+from datetime import datetime
+
+from .dynamodb import DynamoDBStorage
+from .s3 import S3Storage
 
 class StorageManager:
-    def __init__(self, client=None):
-        self.client = client or storage.Client()
-        self.raw_bucket_name = os.getenv('GCS_RAW_BUCKET')
-        self.processed_bucket_name = os.getenv('GCS_PROCESSED_BUCKET')
-        # Skip bucket existence check since we know they exist
-        logger.info(f"Initialized StorageManager with buckets: {self.raw_bucket_name}, {self.processed_bucket_name}")
-
-    async def store_raw_event(self, source: str, event_data: Dict[str, Any]) -> str:
-        """Store raw event data in the raw bucket"""
-        bucket = self.client.bucket(self.raw_bucket_name)
+    """Manages storage operations across DynamoDB and S3."""
+    
+    def __init__(self):
+        """Initialize storage manager."""
+        self.dynamodb = DynamoDBStorage()
+        self.s3 = S3Storage()
+        self._initialized = False
+    
+    async def initialize(self):
+        """Initialize storage backends."""
+        if not self._initialized:
+            await self.s3.initialize()
+            self._initialized = True
+    
+    async def store_batch_events(self, events: List[Dict[str, Any]], is_raw: bool = False) -> List[str]:
+        """Store a batch of events in both DynamoDB and S3.
         
-        # Create a timestamp-based path
-        timestamp = datetime.utcnow().strftime('%Y/%m/%d/%H')
-        blob_name = f"{source}/{timestamp}/{event_data.get('event_id', datetime.utcnow().isoformat())}.json"
-        
-        blob = bucket.blob(blob_name)
-        
-        # Run the upload in a thread pool since it's a blocking operation
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            partial(
-                blob.upload_from_string,
-                json.dumps(event_data),
-                content_type='application/json'
-            )
-        )
-        
-        return blob_name
-
-    async def store_processed_event(self, event_data: Dict[str, Any]) -> str:
-        """Store processed event data in the processed bucket"""
-        bucket = self.client.bucket(self.processed_bucket_name)
-        
-        # Organize by year/month for efficient querying
-        start_date = datetime.fromisoformat(event_data.get('start_datetime', datetime.utcnow().isoformat()))
-        blob_name = f"{start_date.year}/{start_date.month:02d}/{event_data['event_id']}.json"
-        
-        blob = bucket.blob(blob_name)
-        
-        # Run the upload in a thread pool since it's a blocking operation
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            partial(
-                blob.upload_from_string,
-                json.dumps(event_data),
-                content_type='application/json'
-            )
-        )
-        
-        return blob_name
-
-    async def get_raw_event(self, blob_name: str) -> Optional[Dict[str, Any]]:
-        """Retrieve raw event data"""
-        bucket = self.client.bucket(self.raw_bucket_name)
-        blob = bucket.blob(blob_name)
-        
-        try:
-            # Run the download in a thread pool since it's a blocking operation
-            loop = asyncio.get_event_loop()
-            content = await loop.run_in_executor(None, blob.download_as_string)
-            return json.loads(content)
-        except NotFound:
-            logger.warning(f"Raw event not found: {blob_name}")
-            return None
-
-    async def get_processed_event(self, blob_name: str) -> Optional[Dict[str, Any]]:
-        """Retrieve processed event data"""
-        bucket = self.client.bucket(self.processed_bucket_name)
-        blob = bucket.blob(blob_name)
-        
-        try:
-            # Run the download in a thread pool since it's a blocking operation
-            loop = asyncio.get_event_loop()
-            content = await loop.run_in_executor(None, blob.download_as_string)
-            return json.loads(content)
-        except NotFound:
-            logger.warning(f"Processed event not found: {blob_name}")
-            return None
-
-    async def list_raw_events(self, source: str, prefix: Optional[str] = None) -> List[str]:
-        """List raw events for a given source"""
-        bucket = self.client.bucket(self.raw_bucket_name)
-        full_prefix = f"{source}/"
-        if prefix:
-            full_prefix += prefix
+        Args:
+            events: List of event data to store
+            is_raw: Whether these are raw events
             
-        # Run the list operation in a thread pool since it's a blocking operation
-        loop = asyncio.get_event_loop()
-        blobs = await loop.run_in_executor(None, lambda: list(bucket.list_blobs(prefix=full_prefix)))
-        return [blob.name for blob in blobs]
-
-    async def list_processed_events(self, year: Optional[int] = None, month: Optional[int] = None) -> List[str]:
-        """List processed events, optionally filtered by year/month"""
-        bucket = self.client.bucket(self.processed_bucket_name)
-        prefix = ""
+        Returns:
+            List of stored event IDs
+        """
+        await self.initialize()
         
-        if year:
-            prefix = f"{year}/"
-            if month:
-                prefix += f"{month:02d}/"
-                
-        # Run the list operation in a thread pool since it's a blocking operation
-        loop = asyncio.get_event_loop()
-        blobs = await loop.run_in_executor(None, lambda: list(bucket.list_blobs(prefix=prefix)))
-        return [blob.name for blob in blobs] 
+        # Store in both storages
+        dynamo_ids = await self.dynamodb.store_batch_events(events, is_raw)
+        s3_ids = await self.s3.store_batch_events(events, is_raw)
+        
+        # Return IDs that were successfully stored in both
+        return list(set(dynamo_ids) & set(s3_ids))
+    
+    async def get_raw_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Get a raw event from storage.
+        
+        Args:
+            event_id: ID of the event to retrieve
+            
+        Returns:
+            Raw event data or None if not found
+        """
+        await self.initialize()
+        
+        # Try DynamoDB first, then S3
+        event = await self.dynamodb.get_raw_event(event_id)
+        if not event:
+            event = await self.s3.get_raw_event(event_id)
+        return event
+    
+    async def list_raw_events(
+        self,
+        source: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """List raw events from storage.
+        
+        Args:
+            source: Source platform to filter by
+            start_date: Optional start date filter
+            end_date: Optional end date filter
+            
+        Returns:
+            List of raw event IDs and metadata
+        """
+        await self.initialize()
+        
+        # Get from both storages
+        dynamo_events = await self.dynamodb.list_raw_events(source, start_date, end_date)
+        s3_events = await self.s3.list_raw_events(source, start_date, end_date)
+        
+        # Combine and deduplicate by event_id
+        events_dict = {event['event_id']: event for event in dynamo_events}
+        events_dict.update({event['event_id']: event for event in s3_events})
+        
+        return list(events_dict.values())
+    
+    async def store_processed_event(self, event: Dict[str, Any]) -> Optional[str]:
+        """Store a processed event in both storages.
+        
+        Args:
+            event: Processed event data
+            
+        Returns:
+            Event ID if stored successfully, None otherwise
+        """
+        await self.initialize()
+        
+        # Store in both storages
+        dynamo_id = await self.dynamodb.store_processed_event(event)
+        s3_id = await self.s3.store_processed_event(event)
+        
+        # Return ID only if stored in both
+        return dynamo_id if dynamo_id == s3_id else None 

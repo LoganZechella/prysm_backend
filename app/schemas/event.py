@@ -1,3 +1,7 @@
+"""
+Event schema definitions.
+"""
+
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from pydantic import BaseModel
@@ -24,6 +28,16 @@ class EventBase(BaseModel):
 class EventCreate(EventBase):
     """Pydantic model for creating events."""
     pass
+
+class Event(EventBase):
+    """Pydantic model for events in the database."""
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        """Pydantic model configuration."""
+        from_attributes = True  # Allows conversion from SQLAlchemy models
 
 class EventResponse(EventBase):
     """Pydantic model for event responses."""

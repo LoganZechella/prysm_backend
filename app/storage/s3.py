@@ -1,411 +1,222 @@
-import logging
+"""S3 storage implementation for events."""
+
+import os
 import json
-import boto3
-from botocore.exceptions import ClientError
-from typing import List, Dict, Any, Optional
+import aioboto3
 from datetime import datetime
-import hashlib
-from urllib.parse import urlparse
-import io
+from typing import Dict, Any, List, Optional
+from botocore.exceptions import ClientError
 
-from .base import StorageInterface
-from app.config.aws import AWSConfig
+from .base import BaseStorage
 
-logger = logging.getLogger(__name__)
-
-class S3Storage(StorageInterface):
-    """S3 storage implementation for raw data and images"""
+class S3Storage(BaseStorage):
+    """S3 storage implementation."""
     
-    def __init__(self, bucket_name: str, aws_config: Optional[AWSConfig] = None):
-        """Initialize S3 storage"""
-        self.aws_config = aws_config or AWSConfig()
-        self.bucket_name = bucket_name or self.aws_config.get_s3_bucket_name()
-        
-        # Initialize S3 client with credentials
-        credentials = self.aws_config.get_credentials()
-        self.s3_client = boto3.client(
-            's3',
-            region_name=self.aws_config.get_region(),
-            aws_access_key_id=credentials['access_key_id'],
-            aws_secret_access_key=credentials['secret_access_key'],
-            aws_session_token=credentials.get('session_token')
-        )
-        
-        # Create bucket if it doesn't exist
+    def __init__(self):
+        """Initialize S3 storage."""
+        self.session = aioboto3.Session()
+        self.bucket_name = os.getenv('S3_BUCKET_NAME', 'prysm-events')
+    
+    async def initialize(self):
+        """Initialize S3 storage and ensure bucket exists."""
         try:
-            self.s3_client.head_bucket(Bucket=self.bucket_name)
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == '404':
-                self.s3_client.create_bucket(
-                    Bucket=self.bucket_name,
-                    CreateBucketConfiguration={
-                        'LocationConstraint': self.aws_config.get_region()
-                    }
-                )
-                
-                # Configure bucket based on settings
-                s3_config = self.aws_config.get_s3_config()
-                
-                # Enable versioning if configured
-                if s3_config.get('versioning') == 'enabled':
-                    self.s3_client.put_bucket_versioning(
-                        Bucket=self.bucket_name,
-                        VersioningConfiguration={'Status': 'Enabled'}
-                    )
-                
-                # Set lifecycle rules if configured
-                lifecycle_rules = s3_config.get('lifecycle_rules', {})
-                if lifecycle_rules:
-                    self.s3_client.put_bucket_lifecycle_configuration(
-                        Bucket=self.bucket_name,
-                        LifecycleConfiguration={
-                            'Rules': [
-                                {
-                                    'ID': 'raw-data-expiration',
-                                    'Status': 'Enabled',
-                                    'Prefix': 'raw/',
-                                    'Expiration': {
-                                        'Days': lifecycle_rules.get('raw_data_retention_days', 90)
+            async with self.session.client('s3') as s3:
+                try:
+                    await s3.head_bucket(Bucket=self.bucket_name)
+                except ClientError as e:
+                    error_code = e.response['Error']['Code']
+                    if error_code == '404':
+                        await s3.create_bucket(
+                            Bucket=self.bucket_name,
+                            CreateBucketConfiguration={
+                                'LocationConstraint': os.getenv('AWS_REGION', 'us-west-2')
+                            }
+                        )
+                        
+                        # Enable versioning
+                        await s3.put_bucket_versioning(
+                            Bucket=self.bucket_name,
+                            VersioningConfiguration={'Status': 'Enabled'}
+                        )
+                        
+                        # Enable encryption
+                        await s3.put_bucket_encryption(
+                            Bucket=self.bucket_name,
+                            ServerSideEncryptionConfiguration={
+                                'Rules': [
+                                    {
+                                        'ApplyServerSideEncryptionByDefault': {
+                                            'SSEAlgorithm': 'AES256'
+                                        }
                                     }
-                                },
-                                {
-                                    'ID': 'processed-data-expiration',
-                                    'Status': 'Enabled',
-                                    'Prefix': 'processed/',
-                                    'Expiration': {
-                                        'Days': lifecycle_rules.get('processed_data_retention_days', 30)
-                                    }
-                                }
-                            ]
-                        }
-                    )
+                                ]
+                            }
+                        )
                 
-                # Configure CORS if specified
-                cors_config = s3_config.get('cors', {})
-                if cors_config:
-                    self.s3_client.put_bucket_cors(
-                        Bucket=self.bucket_name,
-                        CORSConfiguration={
-                            'CORSRules': [
-                                {
-                                    'AllowedOrigins': cors_config.get('allowed_origins', ['*']),
-                                    'AllowedMethods': cors_config.get('allowed_methods', ['GET', 'PUT', 'POST']),
-                                    'AllowedHeaders': cors_config.get('allowed_headers', ['*']),
-                                    'MaxAgeSeconds': cors_config.get('max_age_seconds', 3600)
-                                }
-                            ]
-                        }
-                    )
-    
-    def _generate_key(self, prefix: str, identifier: str) -> str:
-        """Generate S3 key with prefix and identifier"""
-        return f"{prefix}/{identifier}"
-    
-    def _generate_image_key(self, image_url: str, event_id: str) -> str:
-        """Generate unique key for image storage"""
-        url_hash = hashlib.md5(image_url.encode()).hexdigest()
-        ext = self._get_file_extension(image_url)
-        return f"images/{event_id}/{url_hash}{ext}"
-    
-    def _get_file_extension(self, url: str) -> str:
-        """Get file extension from URL"""
-        path = urlparse(url).path
-        return path[path.rfind('.'):] if '.' in path else ''
-    
-    async def store_raw_event(self, event_data: Dict[str, Any], source: str) -> str:
-        """Store raw event data in S3"""
-        try:
-            event_id = event_data.get('id', '')
-            key = self._generate_key(f"raw/{source}", event_id)
-            
-            self.s3_client.put_object(
-                Bucket=self.bucket_name,
-                Key=key,
-                Body=json.dumps(event_data),
-                ContentType='application/json'
-            )
-            
-            return event_id
-            
         except Exception as e:
-            logger.error(f"Error storing raw event in S3: {str(e)}")
+            print(f"Error creating S3 bucket: {str(e)}")
             raise
     
-    async def store_processed_event(self, event_data: Dict[str, Any]) -> str:
-        """Store processed event data in S3"""
-        try:
-            event_id = event_data.get('event_id', '')
-            key = self._generate_key('processed', event_id)
-            
-            self.s3_client.put_object(
-                Bucket=self.bucket_name,
-                Key=key,
-                Body=json.dumps(event_data),
-                ContentType='application/json'
-            )
-            
-            return event_id
-            
-        except Exception as e:
-            logger.error(f"Error storing processed event in S3: {str(e)}")
-            raise
+    def _get_raw_key(self, event_id: str, source: str) -> str:
+        """Get S3 key for raw event data."""
+        return f"raw-events/{source}/{event_id}.json"
     
-    async def get_raw_event(self, event_id: str, source: str) -> Optional[Dict[str, Any]]:
-        """Retrieve raw event data from S3"""
-        try:
-            key = self._generate_key(f"raw/{source}", event_id)
-            
-            response = self.s3_client.get_object(
-                Bucket=self.bucket_name,
-                Key=key
-            )
-            
-            return json.loads(response['Body'].read())
-            
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchKey':
-                return None
-            raise
-        except Exception as e:
-            logger.error(f"Error retrieving raw event from S3: {str(e)}")
-            return None
+    def _get_processed_key(self, event_id: str) -> str:
+        """Get S3 key for processed event data."""
+        return f"processed/{event_id}.json"
     
-    async def get_processed_event(self, event_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve processed event data from S3"""
-        try:
-            key = self._generate_key('processed', event_id)
+    async def store_batch_events(self, events: List[Dict[str, Any]], is_raw: bool = False) -> List[str]:
+        """Store a batch of events in S3.
+        
+        Args:
+            events: List of event data to store
+            is_raw: Whether these are raw events
             
-            response = self.s3_client.get_object(
-                Bucket=self.bucket_name,
-                Key=key
-            )
-            
-            return json.loads(response['Body'].read())
-            
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchKey':
-                return None
-            raise
-        except Exception as e:
-            logger.error(f"Error retrieving processed event from S3: {str(e)}")
-            return None
-    
-    async def store_image(self, image_url: str, image_data: bytes, event_id: str) -> str:
-        """Store event image in S3"""
-        try:
-            key = self._generate_image_key(image_url, event_id)
-            
-            self.s3_client.put_object(
-                Bucket=self.bucket_name,
-                Key=key,
-                Body=image_data,
-                ContentType='image/jpeg'  # Assuming JPEG, could be made dynamic
-            )
-            
-            return f"s3://{self.bucket_name}/{key}"
-            
-        except Exception as e:
-            logger.error(f"Error storing image in S3: {str(e)}")
-            raise
-    
-    async def get_image(self, image_url: str) -> Optional[bytes]:
-        """Retrieve event image from S3"""
-        try:
-            if not image_url.startswith('s3://'):
-                return None
-            
-            # Parse S3 URL
-            parts = urlparse(image_url)
-            bucket = parts.netloc
-            key = parts.path.lstrip('/')
-            
-            response = self.s3_client.get_object(
-                Bucket=bucket,
-                Key=key
-            )
-            
-            return response['Body'].read()
-            
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchKey':
-                return None
-            raise
-        except Exception as e:
-            logger.error(f"Error retrieving image from S3: {str(e)}")
-            return None
-    
-    async def list_events(
-        self,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        location: Optional[Dict[str, float]] = None,
-        radius_km: Optional[float] = None,
-        categories: Optional[List[str]] = None,
-        price_range: Optional[Dict[str, float]] = None
-    ) -> List[Dict[str, Any]]:
-        """List processed events from S3"""
-        try:
-            # List all processed events
-            paginator = self.s3_client.get_paginator('list_objects_v2')
-            pages = paginator.paginate(
-                Bucket=self.bucket_name,
-                Prefix='processed/'
-            )
-            
-            events = []
-            for page in pages:
-                for obj in page.get('Contents', []):
-                    response = self.s3_client.get_object(
-                        Bucket=self.bucket_name,
-                        Key=obj['Key']
-                    )
-                    event = json.loads(response['Body'].read())
+        Returns:
+            List of stored event IDs
+        """
+        stored_ids = []
+        
+        async with self.session.client('s3') as s3:
+            for event in events:
+                try:
+                    event_id = event['event_id']
+                    source = event.get('source', 'unknown')
                     
-                    # Apply filters
-                    if self._matches_filters(
-                        event,
-                        start_date,
-                        end_date,
-                        location,
-                        radius_km,
-                        categories,
-                        price_range
-                    ):
-                        events.append(event)
+                    # Get appropriate key
+                    key = self._get_raw_key(event_id, source) if is_raw else self._get_processed_key(event_id)
+                    
+                    # Store event data
+                    await s3.put_object(
+                        Bucket=self.bucket_name,
+                        Key=key,
+                        Body=json.dumps(event),
+                        ContentType='application/json'
+                    )
+                    
+                    stored_ids.append(event_id)
+                    
+                except Exception as e:
+                    print(f"Error storing event {event.get('event_id')} in S3: {str(e)}")
+                    continue
+        
+        return stored_ids
+    
+    async def get_raw_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Get a raw event from S3.
+        
+        Args:
+            event_id: ID of the event to retrieve
+            
+        Returns:
+            Raw event data or None if not found
+        """
+        try:
+            async with self.session.client('s3') as s3:
+                # List objects to find the source
+                paginator = s3.get_paginator('list_objects_v2')
+                prefix = f"raw-events/"
+                
+                async for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
+                    for obj in page.get('Contents', []):
+                        if event_id in obj['Key']:
+                            response = await s3.get_object(
+                                Bucket=self.bucket_name,
+                                Key=obj['Key']
+                            )
+                            async with response['Body'] as stream:
+                                data = await stream.read()
+                                return json.loads(data.decode('utf-8'))
+                
+                return None
+                
+        except Exception as e:
+            print(f"Error getting raw event {event_id} from S3: {str(e)}")
+            return None
+    
+    async def list_raw_events(
+        self,
+        source: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """List raw events from S3.
+        
+        Args:
+            source: Source platform to filter by
+            start_date: Optional start date filter
+            end_date: Optional end date filter
+            
+        Returns:
+            List of raw event IDs and metadata
+        """
+        try:
+            events = []
+            prefix = f"raw-events/{source}/"
+            
+            async with self.session.client('s3') as s3:
+                paginator = s3.get_paginator('list_objects_v2')
+                async for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
+                    for obj in page.get('Contents', []):
+                        try:
+                            # Get event data
+                            response = await s3.get_object(
+                                Bucket=self.bucket_name,
+                                Key=obj['Key']
+                            )
+                            async with response['Body'] as stream:
+                                data = await stream.read()
+                                event_data = json.loads(data.decode('utf-8'))
+                            
+                            # Apply date filters
+                            ingestion_time = datetime.fromisoformat(
+                                event_data.get('raw_ingestion_time', '').replace('Z', '+00:00')
+                            )
+                            
+                            if start_date and ingestion_time < start_date:
+                                continue
+                            if end_date and ingestion_time > end_date:
+                                continue
+                            
+                            events.append({
+                                'event_id': event_data['event_id'],
+                                'source': event_data['source'],
+                                'ingestion_time': event_data.get('raw_ingestion_time')
+                            })
+                            
+                        except Exception as e:
+                            print(f"Error processing S3 object {obj['Key']}: {str(e)}")
+                            continue
             
             return events
             
         except Exception as e:
-            logger.error(f"Error listing events from S3: {str(e)}")
+            print(f"Error listing raw events from S3: {str(e)}")
             return []
     
-    def _matches_filters(
-        self,
-        event: Dict[str, Any],
-        start_date: Optional[datetime],
-        end_date: Optional[datetime],
-        location: Optional[Dict[str, float]],
-        radius_km: Optional[float],
-        categories: Optional[List[str]],
-        price_range: Optional[Dict[str, float]]
-    ) -> bool:
-        """Check if event matches the given filters"""
-        # Date filter
-        if start_date and event['start_datetime'] < start_date.isoformat():
-            return False
-        if end_date and event['start_datetime'] > end_date.isoformat():
-            return False
+    async def store_processed_event(self, event: Dict[str, Any]) -> Optional[str]:
+        """Store a processed event in S3.
         
-        # Location filter (simplified distance check)
-        if location and radius_km:
-            event_loc = event['location']['coordinates']
-            if not self._within_radius(
-                event_loc['lat'],
-                event_loc['lng'],
-                location['lat'],
-                location['lng'],
-                radius_km
-            ):
-                return False
-        
-        # Category filter
-        if categories and not any(cat in event['categories'] for cat in categories):
-            return False
-        
-        # Price filter
-        if price_range:
-            price_info = event['price_info']
-            if (
-                price_info['min_price'] > price_range.get('max', float('inf')) or
-                price_info['max_price'] < price_range.get('min', 0)
-            ):
-                return False
-        
-        return True
-    
-    def _within_radius(
-        self,
-        lat1: float,
-        lon1: float,
-        lat2: float,
-        lon2: float,
-        radius_km: float
-    ) -> bool:
-        """Simple distance check using bounding box"""
-        # Approximate degrees per km
-        km_per_deg = 111.0
-        
-        lat_diff = abs(lat1 - lat2)
-        lon_diff = abs(lon1 - lon2)
-        
-        return (
-            lat_diff * km_per_deg <= radius_km and
-            lon_diff * km_per_deg <= radius_km
-        )
-    
-    async def update_event(self, event_id: str, update_data: Dict[str, Any]) -> bool:
-        """Update event data in S3"""
+        Args:
+            event: Processed event data
+            
+        Returns:
+            Event ID if stored successfully, None otherwise
+        """
         try:
-            # Get existing event
-            existing_event = await self.get_processed_event(event_id)
-            if not existing_event:
-                return False
+            event_id = event['event_id']
+            key = self._get_processed_key(event_id)
             
-            # Update event data
-            existing_event.update(update_data)
+            async with self.session.client('s3') as s3:
+                await s3.put_object(
+                    Bucket=self.bucket_name,
+                    Key=key,
+                    Body=json.dumps(event),
+                    ContentType='application/json'
+                )
             
-            # Store updated event
-            await self.store_processed_event(existing_event)
-            return True
+            return event_id
             
         except Exception as e:
-            logger.error(f"Error updating event in S3: {str(e)}")
-            return False
-    
-    async def delete_event(self, event_id: str) -> bool:
-        """Delete event data from S3"""
-        try:
-            # Delete processed event
-            key = self._generate_key('processed', event_id)
-            self.s3_client.delete_object(
-                Bucket=self.bucket_name,
-                Key=key
-            )
-            
-            # Delete associated images
-            paginator = self.s3_client.get_paginator('list_objects_v2')
-            pages = paginator.paginate(
-                Bucket=self.bucket_name,
-                Prefix=f"images/{event_id}/"
-            )
-            
-            for page in pages:
-                for obj in page.get('Contents', []):
-                    self.s3_client.delete_object(
-                        Bucket=self.bucket_name,
-                        Key=obj['Key']
-                    )
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error deleting event from S3: {str(e)}")
-            return False
-    
-    async def store_batch_events(self, events: List[Dict[str, Any]], is_raw: bool = False) -> List[str]:
-        """Store multiple events in S3"""
-        try:
-            event_ids = []
-            for event in events:
-                if is_raw:
-                    source = event.get('source', {}).get('platform', 'unknown')
-                    event_id = await self.store_raw_event(event, source)
-                else:
-                    event_id = await self.store_processed_event(event)
-                event_ids.append(event_id)
-            return event_ids
-            
-        except Exception as e:
-            logger.error(f"Error storing batch events in S3: {str(e)}")
-            return [] 
+            print(f"Error storing processed event {event.get('event_id')} in S3: {str(e)}")
+            return None 
