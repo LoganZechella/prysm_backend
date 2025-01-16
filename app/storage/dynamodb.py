@@ -1,300 +1,185 @@
-import logging
-import boto3
-from botocore.exceptions import ClientError
-from typing import List, Dict, Any, Optional
-from datetime import datetime
+"""DynamoDB storage implementation for events."""
+
+import os
 import json
-from decimal import Decimal
+import aioboto3
+from datetime import datetime
+from typing import Dict, Any, List, Optional
 
-from .base import StorageInterface
+from .base import BaseStorage
 
-logger = logging.getLogger(__name__)
-
-class DynamoDBStorage(StorageInterface):
-    """DynamoDB storage implementation for processed events"""
+class DynamoDBStorage(BaseStorage):
+    """DynamoDB storage implementation."""
     
-    def __init__(self, table_name: str, aws_region: str = 'us-west-2'):
-        """Initialize DynamoDB storage"""
-        self.table_name = table_name
-        self.dynamodb = boto3.resource('dynamodb', region_name=aws_region)
-        self.table = self.dynamodb.Table(table_name) # type: ignore
-
+    def __init__(self):
+        """Initialize DynamoDB storage."""
+        self.session = aioboto3.Session()
+        self.events_table_name = os.getenv('DYNAMODB_EVENTS_TABLE', 'prysm-events')
+        self.raw_events_table_name = os.getenv('DYNAMODB_RAW_EVENTS_TABLE', 'prysm-raw-events')
+    
+    async def store_batch_events(self, events: List[Dict[str, Any]], is_raw: bool = False) -> List[str]:
+        """Store a batch of events in DynamoDB.
         
-        # Create table if it doesn't exist
-        try:
-            self.table.table_status
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'ResourceNotFoundException':
-                self._create_table()
-    
-    def _create_table(self):
-        """Create DynamoDB table with required indexes"""
-        table = self.dynamodb.create_table( # type: ignore
-            TableName=self.table_name,
-            KeySchema=[
-                {
-                    'AttributeName': 'event_id',
-                    'KeyType': 'HASH'
-                }
-            ],
-            AttributeDefinitions=[
-                {
-                    'AttributeName': 'event_id',
-                    'AttributeType': 'S'
-                },
-                {
-                    'AttributeName': 'start_datetime',
-                    'AttributeType': 'S'
-                },
-                {
-                    'AttributeName': 'location_hash',
-                    'AttributeType': 'S'
-                }
-            ],
-            GlobalSecondaryIndexes=[
-                {
-                    'IndexName': 'start_datetime-index',
-                    'KeySchema': [
-                        {
-                            'AttributeName': 'start_datetime',
-                            'KeyType': 'HASH'
-                        }
-                    ],
-                    'Projection': {
-                        'ProjectionType': 'ALL'
-                    },
-                    'ProvisionedThroughput': {
-                        'ReadCapacityUnits': 5,
-                        'WriteCapacityUnits': 5
-                    }
-                },
-                {
-                    'IndexName': 'location-index',
-                    'KeySchema': [
-                        {
-                            'AttributeName': 'location_hash',
-                            'KeyType': 'HASH'
-                        }
-                    ],
-                    'Projection': {
-                        'ProjectionType': 'ALL'
-                    },
-                    'ProvisionedThroughput': {
-                        'ReadCapacityUnits': 5,
-                        'WriteCapacityUnits': 5
-                    }
-                }
-            ],
-            ProvisionedThroughput={
-                'ReadCapacityUnits': 5,
-                'WriteCapacityUnits': 5
-            }
-        )
+        Args:
+            events: List of event data to store
+            is_raw: Whether these are raw events
+            
+        Returns:
+            List of stored event IDs
+        """
+        stored_ids = []
+        table_name = self.raw_events_table_name if is_raw else self.events_table_name
         
-        # Wait for table to be created
-        table.meta.client.get_waiter('table_exists').wait(TableName=self.table_name)
+        dynamodb = await self.session.resource('dynamodb')
+        table = await dynamodb.Table(table_name)
+        
+        # DynamoDB has a limit of 25 items per batch write
+        for i in range(0, len(events), 25):
+            batch = events[i:i + 25]
+            batch_writer = await table.batch_writer()
+            
+            async with batch_writer as writer:
+                for event in batch:
+                    try:
+                        if is_raw:
+                            # Store raw event
+                            item = {
+                                'event_id': event['event_id'],
+                                'source': event['source'],
+                                'raw_data': json.dumps(event),
+                                'ingestion_time': event.get('raw_ingestion_time', datetime.utcnow().isoformat()),
+                                'pipeline_version': event.get('pipeline_version', '1.0')
+                            }
+                        else:
+                            # Store processed event
+                            item = {
+                                'event_id': event['event_id'],
+                                'source': event.get('source', 'unknown'),
+                                'title': event.get('title', ''),
+                                'description': event.get('description', ''),
+                                'start_datetime': event.get('start_datetime', ''),
+                                'end_datetime': event.get('end_datetime', ''),
+                                'location': event.get('location', {}),
+                                'price_info': event.get('price_info', {}),
+                                'image_url': event.get('image_url', ''),
+                                'url': event.get('url', ''),
+                                'processed_at': event.get('processed_at', datetime.utcnow().isoformat()),
+                                'processing_version': event.get('processing_version', '1.0')
+                            }
+                        
+                        await writer.put_item(Item=item)
+                        stored_ids.append(event['event_id'])
+                        
+                    except Exception as e:
+                        # Log error but continue with other events
+                        print(f"Error storing event {event.get('event_id')}: {str(e)}")
+                        continue
+        
+        return stored_ids
     
-    def _generate_location_hash(self, lat: float, lng: float, precision: int = 3) -> str:
-        """Generate location hash for geospatial indexing"""
-        return f"{round(lat, precision)}:{round(lng, precision)}"
-    
-    def _decimal_to_float(self, obj: Any) -> Any:
-        """Convert Decimal objects to float for JSON serialization"""
-        if isinstance(obj, Decimal):
-            return float(obj)
-        elif isinstance(obj, dict):
-            return {k: self._decimal_to_float(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._decimal_to_float(v) for v in obj]
-        return obj
-    
-    async def store_raw_event(self, event_data: Dict[str, Any], source: str) -> str:
-        """Store raw event data (not implemented for DynamoDB)"""
-        raise NotImplementedError("DynamoDB storage does not support raw events")
-    
-    async def store_processed_event(self, event_data: Dict[str, Any]) -> str:
-        """Store processed event data in DynamoDB"""
+    async def get_raw_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Get a raw event from DynamoDB.
+        
+        Args:
+            event_id: ID of the event to retrieve
+            
+        Returns:
+            Raw event data or None if not found
+        """
         try:
-            # Generate location hash
-            location = event_data.get('location', {}).get('coordinates', {})
-            lat = location.get('lat', 0.0)
-            lng = location.get('lng', 0.0)
-            location_hash = self._generate_location_hash(lat, lng)
-            
-            # Add location hash and ensure datetime is string
-            item = {
-                **event_data,
-                'location_hash': location_hash,
-                'start_datetime': event_data['start_datetime'].isoformat() if isinstance(event_data['start_datetime'], datetime) else event_data['start_datetime']
-            }
-            
-            # Store event
-            self.table.put_item(Item=item)
-            return event_data['event_id']
-            
-        except Exception as e:
-            logger.error(f"Error storing processed event in DynamoDB: {str(e)}")
-            raise
-    
-    async def get_raw_event(self, event_id: str, source: str) -> Optional[Dict[str, Any]]:
-        """Get raw event data (not implemented for DynamoDB)"""
-        raise NotImplementedError("DynamoDB storage does not support raw events")
-    
-    async def get_processed_event(self, event_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve processed event data from DynamoDB"""
-        try:
-            response = self.table.get_item(Key={'event_id': event_id})
-            item = response.get('Item')
-            if item:
-                return self._decimal_to_float(item)
+            dynamodb = await self.session.resource('dynamodb')
+            table = await dynamodb.Table(self.raw_events_table_name)
+            response = await table.get_item(Key={'event_id': event_id})
+            if 'Item' in response:
+                item = response['Item']
+                return json.loads(item['raw_data'])
             return None
-            
         except Exception as e:
-            logger.error(f"Error retrieving processed event from DynamoDB: {str(e)}")
+            print(f"Error getting raw event {event_id}: {str(e)}")
             return None
     
-    async def store_image(self, image_url: str, image_data: bytes, event_id: str) -> str:
-        """Store event image (not implemented for DynamoDB)"""
-        raise NotImplementedError("DynamoDB storage does not support image storage")
-    
-    async def get_image(self, image_url: str) -> Optional[bytes]:
-        """Retrieve event image (not implemented for DynamoDB)"""
-        raise NotImplementedError("DynamoDB storage does not support image storage")
-    
-    async def list_events(
+    async def list_raw_events(
         self,
+        source: str,
         start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        location: Optional[Dict[str, float]] = None,
-        radius_km: Optional[float] = None,
-        categories: Optional[List[str]] = None,
-        price_range: Optional[Dict[str, float]] = None
+        end_date: Optional[datetime] = None
     ) -> List[Dict[str, Any]]:
-        """List processed events from DynamoDB"""
-        try:
-            filter_expression = []
-            expression_values = {}
+        """List raw events from DynamoDB.
+        
+        Args:
+            source: Source platform to filter by
+            start_date: Optional start date filter
+            end_date: Optional end date filter
             
-            # Date filter
+        Returns:
+            List of raw event IDs and metadata
+        """
+        try:
+            dynamodb = await self.session.resource('dynamodb')
+            table = await dynamodb.Table(self.raw_events_table_name)
+            
+            # Build filter expression
+            filter_expr = "source = :source"
+            expr_values = {':source': source}
+            
             if start_date:
-                filter_expression.append('start_datetime >= :start_date')
-                expression_values[':start_date'] = start_date.isoformat()
+                filter_expr += " AND ingestion_time >= :start"
+                expr_values[':start'] = start_date.isoformat()
             if end_date:
-                filter_expression.append('start_datetime <= :end_date')
-                expression_values[':end_date'] = end_date.isoformat()
+                filter_expr += " AND ingestion_time <= :end"
+                expr_values[':end'] = end_date.isoformat()
             
-            # Location filter
-            if location and radius_km:
-                lat = location['lat']
-                lng = location['lng']
-                location_hash = self._generate_location_hash(lat, lng)
-                filter_expression.append('location_hash = :location_hash')
-                expression_values[':location_hash'] = location_hash
-            
-            # Category filter
-            if categories:
-                filter_expression.append('contains(categories, :category)')
-                expression_values[':category'] = categories[0]  # Simple implementation
-            
-            # Price filter
-            if price_range:
-                if 'min' in price_range:
-                    filter_expression.append('price_info.max_price >= :min_price')
-                    expression_values[':min_price'] = Decimal(str(price_range['min']))
-                if 'max' in price_range:
-                    filter_expression.append('price_info.min_price <= :max_price')
-                    expression_values[':max_price'] = Decimal(str(price_range['max']))
-            
-            # Build query parameters
-            scan_kwargs = {}
-            if filter_expression:
-                scan_kwargs['FilterExpression'] = ' AND '.join(filter_expression)
-                scan_kwargs['ExpressionAttributeValues'] = expression_values
-            
-            # Scan table with filters
-            response = self.table.scan(**scan_kwargs)
-            events = response.get('Items', [])
-            
-            # Handle pagination
-            while 'LastEvaluatedKey' in response:
-                scan_kwargs['ExclusiveStartKey'] = response['LastEvaluatedKey']
-                response = self.table.scan(**scan_kwargs)
-                events.extend(response.get('Items', []))
-            
-            return [self._decimal_to_float(event) for event in events]
-            
-        except Exception as e:
-            logger.error(f"Error listing events from DynamoDB: {str(e)}")
-            return []
-    
-    async def update_event(self, event_id: str, update_data: Dict[str, Any]) -> bool:
-        """Update event data in DynamoDB"""
-        try:
-            # Build update expression
-            update_expr = []
-            expr_values = {}
-            expr_names = {}
-            
-            for key, value in update_data.items():
-                if key != 'event_id':  # Skip primary key
-                    update_expr.append(f"#{key} = :{key}")
-                    expr_names[f"#{key}"] = key
-                    expr_values[f":{key}"] = value
-            
-            if not update_expr:
-                return False
-            
-            # Update item
-            self.table.update_item(
-                Key={'event_id': event_id},
-                UpdateExpression='SET ' + ', '.join(update_expr),
-                ExpressionAttributeNames=expr_names,
+            # Query raw events
+            response = await table.scan(
+                FilterExpression=filter_expr,
                 ExpressionAttributeValues=expr_values
             )
             
-            return True
+            events = []
+            for item in response.get('Items', []):
+                events.append({
+                    'event_id': item['event_id'],
+                    'source': item['source'],
+                    'ingestion_time': item['ingestion_time']
+                })
             
+            return events
+                
         except Exception as e:
-            logger.error(f"Error updating event in DynamoDB: {str(e)}")
-            return False
+            print(f"Error listing raw events: {str(e)}")
+            return []
     
-    async def delete_event(self, event_id: str) -> bool:
-        """Delete event data from DynamoDB"""
-        try:
-            self.table.delete_item(Key={'event_id': event_id})
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error deleting event from DynamoDB: {str(e)}")
-            return False
-    
-    async def store_batch_events(self, events: List[Dict[str, Any]], is_raw: bool = False) -> List[str]:
-        """Store multiple events in DynamoDB"""
-        if is_raw:
-            raise NotImplementedError("DynamoDB storage does not support raw events")
+    async def store_processed_event(self, event: Dict[str, Any]) -> Optional[str]:
+        """Store a processed event in DynamoDB.
         
+        Args:
+            event: Processed event data
+            
+        Returns:
+            Event ID if stored successfully, None otherwise
+        """
         try:
-            event_ids = []
-            with self.table.batch_writer() as batch:
-                for event in events:
-                    # Generate location hash
-                    location = event.get('location', {}).get('coordinates', {})
-                    lat = location.get('lat', 0.0)
-                    lng = location.get('lng', 0.0)
-                    location_hash = self._generate_location_hash(lat, lng)
-                    
-                    # Add location hash and ensure datetime is string
-                    item = {
-                        **event,
-                        'location_hash': location_hash,
-                        'start_datetime': event['start_datetime'].isoformat() if isinstance(event['start_datetime'], datetime) else event['start_datetime']
-                    }
-                    
-                    batch.put_item(Item=item)
-                    event_ids.append(event['event_id'])
+            dynamodb = await self.session.resource('dynamodb')
+            table = await dynamodb.Table(self.events_table_name)
             
-            return event_ids
+            item = {
+                'event_id': event['event_id'],
+                'source': event.get('source', 'unknown'),
+                'title': event.get('title', ''),
+                'description': event.get('description', ''),
+                'start_datetime': event.get('start_datetime', ''),
+                'end_datetime': event.get('end_datetime', ''),
+                'location': event.get('location', {}),
+                'price_info': event.get('price_info', {}),
+                'image_url': event.get('image_url', ''),
+                'url': event.get('url', ''),
+                'processed_at': event.get('processed_at', datetime.utcnow().isoformat()),
+                'processing_version': event.get('processing_version', '1.0')
+            }
             
+            await table.put_item(Item=item)
+            return event['event_id']
+                
         except Exception as e:
-            logger.error(f"Error storing batch events in DynamoDB: {str(e)}")
-            return [] 
+            print(f"Error storing processed event {event.get('event_id')}: {str(e)}")
+            return None 

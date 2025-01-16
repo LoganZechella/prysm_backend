@@ -17,6 +17,14 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+class RetryError(Exception):
+    """Exception raised when all retry attempts have failed"""
+    
+    def __init__(self, message: str, last_error: Optional[Exception] = None):
+        """Initialize retry error"""
+        super().__init__(message)
+        self.last_error = last_error
+
 class RetryHandler:
     """Handles request retries with exponential backoff"""
     
@@ -94,7 +102,7 @@ class RetryHandler:
             Result from successful operation execution
             
         Raises:
-            The last exception encountered if all retries fail
+            RetryError: When all retry attempts fail
         """
         last_exception = None
         attempt = 0
@@ -141,7 +149,10 @@ class RetryHandler:
                 await asyncio.sleep(delay)
                 
         if last_exception:
-            raise last_exception
+            raise RetryError(
+                f"Operation failed after {attempt} attempts",
+                last_error=last_exception
+            )
             
     def _record_failure(self, operation: str, error: str) -> None:
         """Record a failed operation for monitoring"""
