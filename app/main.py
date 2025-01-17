@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
+import os
 from app.api import api_router
 from app.tasks.event_collection import EventCollectionTask
 
@@ -27,9 +28,12 @@ event_collection_task = EventCollectionTask()
 @app.on_event("startup")
 async def startup_event():
     """Start background tasks when the application starts"""
-    # Start event collection task
-    asyncio.create_task(event_collection_task.start())
-    logger.info("Started event collection task")
+    # Only start event collection task if not in test mode
+    if os.getenv("APP_ENV") != "test":
+        asyncio.create_task(event_collection_task.start())
+        logger.info("Started event collection task")
+    else:
+        logger.info("Skipping event collection task in test mode")
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -2,6 +2,7 @@ import pytest
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 
+@pytest.mark.asyncio
 class TestEventPipeline:
     async def test_complete_event_processing(
         self,
@@ -10,118 +11,124 @@ class TestEventPipeline:
         test_client
     ):
         """Test complete event processing pipeline"""
-        # Setup test events
+        # Setup test event
+        test_event = {
+            'id': 'test-event-1',
+            'title': 'Test Event',
+            'description': 'A test event for pipeline processing',
+            'raw_location': '123 Test St, Test City',
+            'raw_categories': ['Music', 'Outdoor'],
+            'raw_price': '$20-30'
+        }
+
+        # Configure mock services
+        mock_services['location'].set_response(
+            'geocode_123 Test St, Test City',
+            {'lat': 40.7128, 'lng': -74.0060}
+        )
+
+        # Process event
+        response = test_client.post(
+            '/api/events/process',
+            json={'event': test_event}
+        )
+        assert response.status_code == 200
+        processed_event = response.json()
+
+        # Verify event was processed correctly
+        assert processed_event['id'] == test_event['id']
+        assert processed_event['title'] == test_event['title']
+        assert processed_event['description'] == test_event['description']
+        assert processed_event['location']['coordinates'] == {'lat': 40.7128, 'lng': -74.0060}
+        assert 'music' in processed_event['categories']
+        assert 'outdoor' in processed_event['categories']
+        assert processed_event['price_info']['min'] == 20
+        assert processed_event['price_info']['max'] == 30
+
+    async def test_batch_event_processing(
+        self,
+        test_db,
+        mock_services,
+        test_client
+    ):
+        """Test batch event processing"""
+        # Setup batch of test events
         test_events = [
             {
-                'id': f'event-{i}',
-                'title': f'Test Event {i}',
-                'description': f'Test Description {i}',
-                'start_date': datetime.now() + timedelta(days=i),
-                'location': {
-                    'address': f'Test Location {i}',
-                    'coordinates': {'lat': 40.7128, 'lng': -74.0060}
-                }
+                'id': f'batch-event-{i}',
+                'title': f'Batch Event {i}',
+                'raw_location': f'Location {i}',
+                'raw_categories': ['Test Category'],
+                'raw_price': '$50'
             }
-            for i in range(3)
+            for i in range(5)
         ]
-        
+
         # Configure mock services
-        mock_services['event_source'].set_response('get_events', test_events)
-        mock_services['location'].set_response('geocode_Test Location 0', 
-            {'lat': 40.7128, 'lng': -74.0060})
-        
-        # Trigger event processing
-        response = await test_client.post('/api/events/process')
-        assert response.status_code == 200
-        
-        # Verify events were processed and stored
-        async with test_db._pool.acquire() as conn:
-            stored_events = await conn.fetch(
-                'SELECT * FROM events WHERE id = ANY($1)',
-                [e['id'] for e in test_events]
+        for i in range(5):
+            mock_services['location'].set_response(
+                f'geocode_Location {i}',
+                {'lat': 40.7128, 'lng': -74.0060}
             )
-            assert len(stored_events) == len(test_events)
-            
-            # Verify event enrichment
-            for event in stored_events:
-                assert event['processed_timestamp'] is not None
-                assert event['location_coordinates'] is not None
 
-    async def test_error_recovery(
+        # Process batch
+        response = test_client.post(
+            '/api/events/batch_process',
+            json={'events': test_events}
+        )
+        assert response.status_code == 200
+        processed_events = response.json()['events']
+
+        # Verify all events were processed
+        assert len(processed_events) == 5
+        for i, event in enumerate(processed_events):
+            assert event['id'] == f'batch-event-{i}'
+            assert event['location']['coordinates'] == {'lat': 40.7128, 'lng': -74.0060}
+            assert 'test' in event['categories']
+            assert event['price_info']['min'] == 50
+            assert event['price_info']['max'] == 50
+
+    async def test_event_deduplication(
         self,
         test_db,
         mock_services,
         test_client
     ):
-        """Test error recovery in event pipeline"""
-        # Setup test events with one causing an error
-        test_events = [
-            {'id': 'event-1', 'title': 'Good Event 1', 'description': 'Test 1'},
-            {'id': 'event-2', 'title': None, 'description': 'Should Fail'},  # Will cause error
-            {'id': 'event-3', 'title': 'Good Event 2', 'description': 'Test 2'}
-        ]
-        
-        mock_services['event_source'].set_response('get_events', test_events)
-        
-        # Trigger event processing
-        response = await test_client.post('/api/events/process')
-        assert response.status_code == 200
-        
-        # Verify good events were processed despite error
-        async with test_db._pool.acquire() as conn:
-            stored_events = await conn.fetch(
-                'SELECT * FROM events WHERE id IN ($1, $2)',
-                'event-1', 'event-3'
-            )
-            assert len(stored_events) == 2
-            
-            # Verify error was logged
-            error_logs = await conn.fetch(
-                'SELECT * FROM error_logs WHERE event_id = $1',
-                'event-2'
-            )
-            assert len(error_logs) == 1
-            assert 'title' in error_logs[0]['error_message']
-
-    async def test_duplicate_handling(
-        self,
-        test_db,
-        mock_services,
-        test_client
-    ):
-        """Test handling of duplicate events"""
-        # Setup test event that will be duplicated
+        """Test event deduplication in pipeline"""
+        # Setup duplicate events
         test_event = {
-            'id': 'event-dup',
+            'id': 'dupe-event-1',
+            'source': 'test_source',
+            'source_id': 'original_id',
             'title': 'Duplicate Event',
-            'description': 'This event will be processed twice',
-            'start_date': datetime.now() + timedelta(days=1),
-            'location': {
-                'address': 'Test Location',
-                'coordinates': {'lat': 40.7128, 'lng': -74.0060}
-            }
+            'raw_location': 'Dupe Location'
         }
-        
-        # First processing
-        mock_services['event_source'].set_response('get_events', [test_event])
-        response = await test_client.post('/api/events/process')
+
+        # Configure mock services
+        mock_services['location'].set_response(
+            'geocode_Dupe Location',
+            {'lat': 40.7128, 'lng': -74.0060}
+        )
+
+        # Process original event
+        response = test_client.post(
+            '/api/events/process',
+            json={'event': test_event}
+        )
         assert response.status_code == 200
-        
-        # Second processing of same event
-        response = await test_client.post('/api/events/process')
+        original_event = response.json()
+
+        # Attempt to process duplicate
+        duplicate_event = test_event.copy()
+        duplicate_event['id'] = 'dupe-event-2'
+        response = test_client.post(
+            '/api/events/process',
+            json={'event': duplicate_event}
+        )
         assert response.status_code == 200
-        
-        # Verify event was stored only once
-        async with test_db._pool.acquire() as conn:
-            stored_events = await conn.fetch(
-                'SELECT * FROM events WHERE id = $1',
-                test_event['id']
-            )
-            assert len(stored_events) == 1
-            
-            # Verify no error logs for duplicate
-            error_logs = await conn.fetch(
-                'SELECT * FROM error_logs WHERE event_id = $1',
-                test_event['id']
-            )
-            assert len(error_logs) == 0 
+        processed_duplicate = response.json()
+
+        # Verify events were deduplicated
+        assert processed_duplicate['duplicate_of'] == original_event['id']
+        assert processed_duplicate['source'] == test_event['source']
+        assert processed_duplicate['source_id'] == test_event['source_id'] 

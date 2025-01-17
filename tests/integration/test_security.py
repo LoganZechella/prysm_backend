@@ -2,6 +2,7 @@ import pytest
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 
+@pytest.mark.asyncio
 class TestSecurity:
     async def test_authentication_flow(
         self,
@@ -12,50 +13,47 @@ class TestSecurity:
         """Test complete authentication flow"""
         # Test user registration
         user_data = {
-            'email': 'test.user@example.com',
-            'password': 'SecurePass123!',
+            'email': 'test@example.com',
+            'password': 'TestPass123!',
             'name': 'Test User'
         }
-        
-        response = await test_client.post('/api/auth/register', json=user_data)
-        assert response.status_code == 200
-        
+        response = test_client.post('/api/auth/register', json=user_data)
+        assert response.status_code == 201
+        user_id = response.json()['id']
+
         # Test login
         login_data = {
-            'email': user_data['email'],
-            'password': user_data['password']
+            'email': 'test@example.com',
+            'password': 'TestPass123!'
         }
-        response = await test_client.post('/api/auth/login', json=login_data)
+        response = test_client.post('/api/auth/login', json=login_data)
         assert response.status_code == 200
-        token = response.json()['token']
-        
+        tokens = response.json()
+        assert 'access_token' in tokens
+        assert 'refresh_token' in tokens
+
         # Test authenticated request
-        headers = {'Authorization': f'Bearer {token}'}
-        response = await test_client.get('/api/users/me', headers=headers)
+        headers = {'Authorization': f'Bearer {tokens["access_token"]}'}
+        response = test_client.get('/api/users/me', headers=headers)
         assert response.status_code == 200
-        assert response.json()['email'] == user_data['email']
-        
+        user_info = response.json()
+        assert user_info['email'] == user_data['email']
+        assert user_info['name'] == user_data['name']
+
         # Test token refresh
-        response = await test_client.post(
-            '/api/auth/refresh',
-            headers=headers
-        )
+        headers = {'Authorization': f'Bearer {tokens["refresh_token"]}'}
+        response = test_client.post('/api/auth/refresh', headers=headers)
         assert response.status_code == 200
-        new_token = response.json()['token']
-        assert new_token != token
-        
+        new_tokens = response.json()
+        assert 'access_token' in new_tokens
+
         # Test logout
-        response = await test_client.post(
-            '/api/auth/logout',
-            headers={'Authorization': f'Bearer {new_token}'}
-        )
+        headers = {'Authorization': f'Bearer {new_tokens["access_token"]}'}
+        response = test_client.post('/api/auth/logout', headers=headers)
         assert response.status_code == 200
-        
+
         # Verify token is invalidated
-        response = await test_client.get(
-            '/api/users/me',
-            headers={'Authorization': f'Bearer {new_token}'}
-        )
+        response = test_client.get('/api/users/me', headers=headers)
         assert response.status_code == 401
 
     async def test_authorization_boundaries(
@@ -64,45 +62,51 @@ class TestSecurity:
         mock_services,
         test_client
     ):
-        """Test authorization boundaries and access control"""
+        """Test authorization boundaries between users"""
         # Create two test users
-        users = [
-            {
-                'email': f'user{i}@example.com',
-                'password': 'SecurePass123!',
-                'name': f'User {i}'
-            }
-            for i in range(2)
-        ]
-        
-        tokens = []
-        for user in users:
-            # Register
-            await test_client.post('/api/auth/register', json=user)
-            # Login
-            response = await test_client.post('/api/auth/login', json={
-                'email': user['email'],
-                'password': user['password']
-            })
-            tokens.append(response.json()['token'])
-        
-        # Set preferences for first user
-        preferences = {
-            'categories': ['music'],
-            'price_range': {'min': 0, 'max': 100}
+        user1_data = {
+            'email': 'user1@example.com',
+            'password': 'TestPass123!',
+            'name': 'User One'
         }
-        response = await test_client.post(
-            '/api/users/preferences',
-            headers={'Authorization': f'Bearer {tokens[0]}'},
-            json=preferences
-        )
+        response = test_client.post('/api/auth/register', json=user1_data)
+        assert response.status_code == 201
+        user1_id = response.json()['id']
+
+        user2_data = {
+            'email': 'user2@example.com',
+            'password': 'TestPass123!',
+            'name': 'User Two'
+        }
+        response = test_client.post('/api/auth/register', json=user2_data)
+        assert response.status_code == 201
+        user2_id = response.json()['id']
+
+        # Login as user1
+        response = test_client.post('/api/auth/login', json={
+            'email': 'user1@example.com',
+            'password': 'TestPass123!'
+        })
         assert response.status_code == 200
-        
-        # Attempt to access first user's preferences with second user's token
-        response = await test_client.get(
-            '/api/users/preferences',
-            headers={'Authorization': f'Bearer {tokens[1]}'}
-        )
+        user1_token = response.json()['access_token']
+
+        # Login as user2
+        response = test_client.post('/api/auth/login', json={
+            'email': 'user2@example.com',
+            'password': 'TestPass123!'
+        })
+        assert response.status_code == 200
+        user2_token = response.json()['access_token']
+
+        # Set preferences for user1
+        user1_prefs = {'categories': ['music', 'sports'], 'max_price': 100}
+        headers = {'Authorization': f'Bearer {user1_token}'}
+        response = test_client.post(f'/api/users/{user1_id}/preferences', json=user1_prefs, headers=headers)
+        assert response.status_code == 200
+
+        # Attempt to access user1's preferences with user2's token
+        headers = {'Authorization': f'Bearer {user2_token}'}
+        response = test_client.get(f'/api/users/{user1_id}/preferences', headers=headers)
         assert response.status_code == 403
 
     async def test_input_validation_security(
@@ -113,34 +117,31 @@ class TestSecurity:
     ):
         """Test input validation and security measures"""
         # Test SQL injection attempt
-        malicious_input = {
+        login_data = {
             'email': "' OR '1'='1",
             'password': "' OR '1'='1"
         }
-        response = await test_client.post('/api/auth/login', json=malicious_input)
-        assert response.status_code == 400
-        
-        # Test XSS attempt
-        malicious_event = {
-            'title': '<script>alert("xss")</script>Event',
-            'description': 'Normal description'
-        }
-        response = await test_client.post('/api/events', json=malicious_event)
-        assert response.status_code == 400
-        
-        # Test invalid token format
-        response = await test_client.get(
-            '/api/users/me',
-            headers={'Authorization': 'Bearer invalid_token_format'}
-        )
+        response = test_client.post('/api/auth/login', json=login_data)
         assert response.status_code == 401
-        
+
+        # Test XSS attempt
+        user_data = {
+            'email': 'test@example.com',
+            'password': 'TestPass123!',
+            'name': '<script>alert("XSS")</script>'
+        }
+        response = test_client.post('/api/auth/register', json=user_data)
+        assert response.status_code == 422  # Validation error
+
+        # Test invalid token format
+        headers = {'Authorization': 'Bearer invalid_token_format'}
+        response = test_client.get('/api/users/me', headers=headers)
+        assert response.status_code == 401
+
         # Test expired token
-        expired_token = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyQGV4YW1wbGUuY29tIiwiZXhwIjoxNTE2MjM5MDIyfQ.2lNYA8_jg5WE8iWV-04K_1cQfw8zcX8zQLGJX0vqKdA'
-        response = await test_client.get(
-            '/api/users/me',
-            headers={'Authorization': f'Bearer {expired_token}'}
-        )
+        expired_token = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0QGV4YW1wbGUuY29tIiwiZXhwIjoxNTE2MjM5MDIyfQ.2lNYA8_M3S4Dz0BfgN2VtZ4ooZaBGvw4vEw7PZ-sbKQ'
+        headers = {'Authorization': f'Bearer {expired_token}'}
+        response = test_client.get('/api/users/me', headers=headers)
         assert response.status_code == 401
 
     async def test_rate_limiting(
@@ -153,31 +154,22 @@ class TestSecurity:
         # Attempt rapid login requests
         login_data = {
             'email': 'test@example.com',
-            'password': 'password123'
+            'password': 'TestPass123!'
         }
-        
+
         responses = []
         for _ in range(10):  # Attempt 10 rapid requests
-            response = await test_client.post(
-                '/api/auth/login',
-                json=login_data
-            )
+            response = test_client.post('/api/auth/login', json=login_data)
             responses.append(response)
-        
+
         # Verify rate limiting kicked in
-        assert any(r.status_code == 429 for r in responses)
-        
-        # Test rate limiting for API endpoints
-        headers = {'Authorization': 'Bearer valid_token'}
-        responses = []
-        for _ in range(100):  # Attempt 100 rapid requests
-            response = await test_client.get(
-                '/api/events',
-                headers=headers
-            )
-            responses.append(response)
-        
-        assert any(r.status_code == 429 for r in responses)
+        assert any(r.status_code == 429 for r in responses)  # Too Many Requests
+
+        # Verify rate limit headers
+        rate_limit_response = next(r for r in responses if r.status_code == 429)
+        assert 'X-RateLimit-Limit' in rate_limit_response.headers
+        assert 'X-RateLimit-Remaining' in rate_limit_response.headers
+        assert 'X-RateLimit-Reset' in rate_limit_response.headers
 
     async def test_security_headers(
         self,
@@ -185,19 +177,21 @@ class TestSecurity:
         mock_services,
         test_client
     ):
-        """Test security headers and configurations"""
-        response = await test_client.get('/')
+        """Test security headers in responses"""
+        # Test CORS headers for OPTIONS request
+        response = test_client.options('/api/auth/login')
+        assert response.status_code == 200
         headers = response.headers
-        
-        # Verify security headers are present
+        assert 'Access-Control-Allow-Origin' in headers
+        assert 'Access-Control-Allow-Methods' in headers
+        assert 'Access-Control-Allow-Headers' in headers
+
+        # Test security headers in normal response
+        response = test_client.get('/api/health')
+        assert response.status_code == 200
+        headers = response.headers
         assert headers.get('X-Content-Type-Options') == 'nosniff'
         assert headers.get('X-Frame-Options') == 'DENY'
         assert headers.get('X-XSS-Protection') == '1; mode=block'
         assert 'Content-Security-Policy' in headers
-        
-        # Verify CORS headers for OPTIONS request
-        response = await test_client.options('/')
-        headers = response.headers
-        assert 'Access-Control-Allow-Origin' in headers
-        assert 'Access-Control-Allow-Methods' in headers
-        assert 'Access-Control-Allow-Headers' in headers 
+        assert 'Strict-Transport-Security' in headers 

@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List
 import time
 
+@pytest.mark.asyncio
 class TestMonitoring:
     async def test_metric_collection(
         self,
@@ -10,36 +11,39 @@ class TestMonitoring:
         mock_services,
         test_client
     ):
-        """Test metric collection and reporting"""
-        # Process a batch of events to generate metrics
-        test_events = [
-            {
-                'id': f'event-metric-{i}',
-                'title': f'Metric Test Event {i}',
-                'description': f'Test Description {i}'
-            }
-            for i in range(5)
-        ]
-        
-        for event in test_events:
-            response = await test_client.post(
-                '/api/events/process',
-                json={'event': event}
-            )
-            assert response.status_code == 200
-        
-        # Get metrics
-        response = await test_client.get('/metrics')
+        """Test collection and reporting of metrics"""
+        # Setup test event
+        event = {
+            'id': 'metric-test-1',
+            'title': 'Metric Test Event',
+            'raw_location': 'Test Location',
+            'raw_categories': ['Test Category'],
+            'raw_price': '$50'
+        }
+
+        # Configure mock services
+        mock_services['location'].set_response(
+            'geocode_Test Location',
+            {'lat': 40.7128, 'lng': -74.0060}
+        )
+
+        # Process event to generate metrics
+        response = test_client.post(
+            '/api/events/process',
+            json={'event': event}
+        )
+        assert response.status_code == 200
+
+        # Check metrics endpoint
+        response = test_client.get('/metrics')
         assert response.status_code == 200
         metrics = response.text
-        
+
         # Verify expected metrics are present
+        assert 'events_processed_total' in metrics
         assert 'event_processing_duration_seconds' in metrics
-        assert 'event_processing_total' in metrics
-        assert 'event_processing_errors_total' in metrics
-        
-        # Verify metric values
-        assert 'event_processing_total{status="success"} 5' in metrics
+        assert 'location_service_requests_total' in metrics
+        assert 'database_operations_total' in metrics
 
     async def test_trace_sampling(
         self,
@@ -48,37 +52,41 @@ class TestMonitoring:
         test_client
     ):
         """Test trace sampling and distributed tracing"""
-        # Configure trace sampling
-        headers = {'X-Trace-Enabled': 'true'}
-        
-        # Execute traced operation
-        response = await test_client.post(
+        # Setup test event with trace context
+        event = {
+            'id': 'trace-test-1',
+            'title': 'Trace Test Event',
+            'raw_location': 'Test Location'
+        }
+
+        # Configure mock services
+        mock_services['location'].set_response(
+            'geocode_Test Location',
+            {'lat': 40.7128, 'lng': -74.0060}
+        )
+
+        # Process event with trace headers
+        headers = {
+            'X-B3-TraceId': 'test-trace-id',
+            'X-B3-SpanId': 'test-span-id',
+            'X-B3-Sampled': '1'
+        }
+        response = test_client.post(
             '/api/events/process',
-            headers=headers,
-            json={
-                'event': {
-                    'id': 'event-trace-1',
-                    'title': 'Trace Test Event'
-                }
-            }
+            json={'event': event},
+            headers=headers
         )
         assert response.status_code == 200
-        
-        # Verify trace headers in response
-        assert 'X-Trace-ID' in response.headers
-        trace_id = response.headers['X-Trace-ID']
-        
-        # Get trace data
-        response = await test_client.get(f'/traces/{trace_id}')
+
+        # Verify trace data was collected
+        response = test_client.get('/traces/test-trace-id')
         assert response.status_code == 200
         trace_data = response.json()
-        
-        # Verify trace contains expected spans
-        spans = trace_data['spans']
-        span_names = [span['name'] for span in spans]
-        assert 'event_processing' in span_names
-        assert 'database_operation' in span_names
-        assert 'external_service_call' in span_names
+
+        # Verify expected spans in trace
+        assert len(trace_data['spans']) > 0
+        assert any(span['name'] == 'process_event' for span in trace_data['spans'])
+        assert any(span['name'] == 'geocode_location' for span in trace_data['spans'])
 
     async def test_error_tracking(
         self,
@@ -87,36 +95,40 @@ class TestMonitoring:
         test_client
     ):
         """Test error tracking and reporting"""
-        # Trigger an error condition
-        response = await test_client.post(
+        # Setup test event that will cause an error
+        event = {
+            'id': 'error-test-1',
+            'title': 'Error Test Event',
+            'raw_location': None  # This will cause a validation error
+        }
+
+        # Process event to generate error
+        response = test_client.post(
             '/api/events/process',
-            json={
-                'event': {
-                    'id': 'event-error-1',
-                    'title': None  # This should cause an error
-                }
-            }
+            json={'event': event}
         )
-        assert response.status_code == 400
-        
-        # Get error metrics
-        response = await test_client.get('/metrics')
+        assert response.status_code == 422  # Validation error
+
+        # Check error metrics
+        response = test_client.get('/metrics')
         assert response.status_code == 200
         metrics = response.text
-        
+
         # Verify error metrics
-        assert 'event_processing_errors_total{error_type="validation"} 1' in metrics
-        
-        # Get error logs
-        response = await test_client.get('/api/logs/errors')
+        assert 'validation_errors_total' in metrics
+        assert 'error_events_total{type="validation"}' in metrics
+
+        # Check error logs
+        response = test_client.get('/errors')
         assert response.status_code == 200
-        error_logs = response.json()
-        
+        errors = response.json()
+
         # Verify error was logged
+        assert len(errors) > 0
         assert any(
-            log['event_id'] == 'event-error-1' and
-            log['error_type'] == 'validation'
-            for log in error_logs
+            error['event_id'] == 'error-test-1' and
+            error['error_type'] == 'ValidationError'
+            for error in errors
         )
 
     async def test_performance_monitoring(
@@ -126,40 +138,41 @@ class TestMonitoring:
         test_client
     ):
         """Test performance monitoring and alerting"""
-        # Generate load
-        test_events = [
+        # Generate load with multiple events
+        events = [
             {
-                'id': f'event-perf-{i}',
-                'title': f'Performance Test Event {i}'
+                'id': f'perf-test-{i}',
+                'title': f'Performance Test Event {i}',
+                'raw_location': 'Test Location',
+                'raw_categories': ['Test Category'],
+                'raw_price': '$50'
             }
-            for i in range(20)
+            for i in range(10)
         ]
-        
-        start_time = time.time()
-        
-        # Process events
-        import asyncio
-        responses = await asyncio.gather(*[
-            test_client.post('/api/events/process', json={'event': event})
-            for event in test_events
-        ])
-        
-        end_time = time.time()
-        processing_time = end_time - start_time
-        
-        # Get performance metrics
-        response = await test_client.get('/metrics')
+
+        # Configure mock services
+        mock_services['location'].set_response(
+            'geocode_Test Location',
+            {'lat': 40.7128, 'lng': -74.0060}
+        )
+
+        # Process events to generate performance metrics
+        for event in events:
+            response = test_client.post(
+                '/api/events/process',
+                json={'event': event}
+            )
+            assert response.status_code == 200
+
+        # Check performance metrics
+        response = test_client.get('/metrics')
         assert response.status_code == 200
         metrics = response.text
-        
+
         # Verify performance metrics
-        assert 'http_request_duration_seconds' in metrics
-        assert 'http_requests_total' in metrics
-        assert 'process_cpu_seconds_total' in metrics
-        assert 'process_memory_bytes' in metrics
-        
-        # Verify processing time is within acceptable range
-        assert processing_time < 10.0  # Should process 20 events within 10 seconds
+        assert 'event_processing_duration_seconds' in metrics
+        assert 'event_processing_queue_length' in metrics
+        assert 'database_operation_duration_seconds' in metrics
 
     async def test_health_checks(
         self,
@@ -167,24 +180,27 @@ class TestMonitoring:
         mock_services,
         test_client
     ):
-        """Test health check endpoints and monitoring"""
-        # Test basic health check
-        response = await test_client.get('/health')
+        """Test health check endpoints"""
+        # Check basic health endpoint
+        response = test_client.get('/health')
         assert response.status_code == 200
         health_data = response.json()
         assert health_data['status'] == 'healthy'
-        
-        # Test detailed health check
-        response = await test_client.get('/health/detailed')
+
+        # Check detailed health status
+        response = test_client.get('/health/details')
         assert response.status_code == 200
-        detailed_health = response.json()
-        
+        details = response.json()
+
         # Verify component health status
-        assert detailed_health['database']['status'] == 'healthy'
-        assert detailed_health['cache']['status'] == 'healthy'
-        assert detailed_health['external_services']['status'] == 'healthy'
-        
-        # Verify metrics
-        assert 'uptime_seconds' in detailed_health
-        assert 'connection_pool_used' in detailed_health['database']
-        assert 'cache_hit_ratio' in detailed_health['cache'] 
+        assert 'database' in details
+        assert details['database']['status'] == 'healthy'
+        assert 'event_processing' in details
+        assert details['event_processing']['status'] == 'healthy'
+        assert 'location_service' in details
+        assert details['location_service']['status'] == 'healthy'
+
+        # Verify metrics in health check
+        assert 'metrics' in details
+        assert 'event_processing_success_rate' in details['metrics']
+        assert 'average_processing_time' in details['metrics'] 

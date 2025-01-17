@@ -3,6 +3,7 @@
 import os
 import logging
 from typing import Optional
+import asyncio
 
 from app.services.event_collection import EventCollectionService
 
@@ -25,6 +26,29 @@ class EventCollectionTask:
             
         # Initialize service
         self.service = EventCollectionService(scrapfly_api_key=self.scrapfly_api_key)
+        self._task = None
+        
+    async def start(self, interval_hours: int = 24):
+        """Start the event collection task.
+        
+        Args:
+            interval_hours: Hours between collection runs
+        """
+        if self._task is not None:
+            logger.warning("Collection task is already running")
+            return
+            
+        self._task = asyncio.create_task(self.run(interval_hours))
+        
+    async def stop(self):
+        """Stop the event collection task."""
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
         
     async def run(self, interval_hours: int = 24):
         """Run the event collection task.

@@ -57,13 +57,4 @@ class MockLocationService(MockServiceBase):
 
     async def get_distance(self, origin: Dict[str, float], destination: Dict[str, float]) -> float:
         self.record_call('get_distance', origin, destination)
-        return self.responses.get(f'get_distance_{str(origin)}_{str(destination)}', 0.0)
-
-@pytest.fixture
-def mock_services():
-    """Fixture providing all mock services"""
-    return {
-        'event_source': MockEventSource(),
-        'recommendations': MockRecommendationService(),
-        'location': MockLocationService()
-    } 
+        return self.responses.get(f'get_distance_{str(origin)}_{str(destination)}', 0.0) 
