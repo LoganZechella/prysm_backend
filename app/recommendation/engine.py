@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import numpy as np
 from sqlalchemy.orm import Session
@@ -13,120 +13,135 @@ class RecommendationEngine:
         self.location_service = LocationService()
         self.price_normalizer = PriceNormalizer()
         self.category_extractor = CategoryExtractor()
+        
+        # Scoring weights
+        self.weights = {
+            'category': 0.35,
+            'location': 0.25,
+            'price': 0.15,
+            'time': 0.15,
+            'popularity': 0.10
+        }
 
-    def score_event(self, event: Event, preferences: UserPreferences) -> float:
+    def score_events_batch(
+        self,
+        events: List[Event],
+        preferences: UserPreferences
+    ) -> np.ndarray:
         """
-        Score an event based on user preferences and event attributes.
-        Returns a score between 0 and 1.
-        """
-        scores = []
+        Score multiple events in batch using vectorized operations.
         
-        # Category match score (0-1)
-        category_score = self._calculate_category_score(event, preferences)
-        scores.append((category_score, 0.35))  # 35% weight
-        
-        # Location score (0-1)
-        location_score = self._calculate_location_score(event, preferences)
-        scores.append((location_score, 0.25))  # 25% weight
-        
-        # Price score (0-1)
-        price_score = self._calculate_price_score(event, preferences)
-        scores.append((price_score, 0.15))  # 15% weight
-        
-        # Time relevance score (0-1)
-        time_score = self._calculate_time_score(event, preferences)
-        scores.append((time_score, 0.15))  # 15% weight
-        
-        # Popularity score (0-1)
-        popularity_score = self._calculate_popularity_score(event)
-        scores.append((popularity_score, 0.10))  # 10% weight
-        
-        # Calculate weighted average
-        final_score = sum(score * weight for score, weight in scores)
-        return float(final_score)
-
-    def _calculate_category_score(self, event: Event, preferences: UserPreferences) -> float:
-        """Calculate how well event categories match user preferences."""
-        if not preferences.preferred_categories:
-            return 0.5  # Neutral score if no preferences
+        Args:
+            events: List of events to score
+            preferences: User preferences
             
-        event_categories = set(event.categories)
+        Returns:
+            Array of scores between 0 and 1 for each event
+        """
+        if not events:
+            return np.array([])
+            
+        # Pre-compute common values
+        now = datetime.utcnow()
         preferred_categories = set(preferences.preferred_categories)
         excluded_categories = set(preferences.excluded_categories)
         
-        # Immediate return 0 if event has any excluded categories
-        if event_categories & excluded_categories:
-            return 0.0
-            
-        # Calculate overlap between event and preferred categories
-        if preferred_categories:
-            overlap = len(event_categories & preferred_categories)
-            return min(1.0, overlap / len(preferred_categories))
-            
-        return 0.5
-
-    def _calculate_location_score(self, event: Event, preferences: UserPreferences) -> float:
-        """Calculate location-based score using the location service."""
-        if not preferences.preferred_location:
-            return 0.5  # Neutral score if no location preference
-            
-        distance = self.location_service.calculate_distance(
-            event.location,
-            preferences.preferred_location
+        # Initialize score arrays
+        n_events = len(events)
+        category_scores = np.zeros(n_events)
+        location_scores = np.zeros(n_events)
+        price_scores = np.zeros(n_events)
+        time_scores = np.zeros(n_events)
+        popularity_scores = np.zeros(n_events)
+        
+        # Batch compute category scores
+        for i, event in enumerate(events):
+            event_categories = set(event.categories)
+            if event_categories & excluded_categories:
+                category_scores[i] = 0.0
+            elif preferred_categories:
+                overlap = len(event_categories & preferred_categories)
+                category_scores[i] = min(1.0, overlap / len(preferred_categories))
+            else:
+                category_scores[i] = 0.5
+        
+        # Batch compute location scores
+        if preferences.preferred_location:
+            max_distance = preferences.preferred_location.get('max_distance_km', 50)
+            distances = np.array([
+                self.location_service.calculate_distance(
+                    event.location,
+                    preferences.preferred_location
+                )
+                for event in events
+            ])
+            location_scores = np.where(
+                distances > max_distance,
+                0.0,
+                1.0 - (distances / max_distance)
+            )
+        else:
+            location_scores.fill(0.5)
+        
+        # Batch compute price scores
+        if preferences.max_price:
+            normalized_prices = np.array([
+                self.price_normalizer.normalize_price(event.price_info)
+                for event in events
+            ])
+            price_range = preferences.max_price - preferences.min_price
+            if price_range <= 0:
+                price_scores.fill(1.0)
+            else:
+                price_scores = np.where(
+                    normalized_prices > preferences.max_price,
+                    0.0,
+                    np.where(
+                        normalized_prices < preferences.min_price,
+                        0.5,
+                        1.0 - ((normalized_prices - preferences.min_price) / price_range)
+                    )
+                )
+        else:
+            price_scores.fill(0.5)
+        
+        # Batch compute time scores
+        days_until = np.array([
+            (event.start_time - now).days if event.start_time else float('inf')
+            for event in events
+        ])
+        
+        time_scores = np.where(
+            days_until <= 7,
+            0.85,
+            np.where(
+                days_until <= 30,
+                0.85 - (0.5 * (days_until - 7) / 23),
+                np.where(
+                    days_until <= 90,
+                    0.35 - (0.25 * (days_until - 30) / 60),
+                    0.1
+                )
+            )
         )
         
-        max_distance = preferences.preferred_location.get('max_distance_km', 50)
-        if distance > max_distance:
-            return 0.0
-            
-        # Linear decay up to max distance
-        return 1.0 - (distance / max_distance)
-
-    def _calculate_price_score(self, event: Event, preferences: UserPreferences) -> float:
-        """Calculate price-based score using price normalizer."""
-        if not event.price_info or not preferences.max_price:
-            return 0.5  # Neutral score if price info missing
-            
-        normalized_price = self.price_normalizer.normalize_price(event.price_info)
+        # Batch compute popularity scores
+        view_counts = np.array([
+            getattr(event, 'view_count', 0) or 0
+            for event in events
+        ])
+        popularity_scores = np.minimum(1.0, view_counts / 1000)
         
-        if normalized_price < preferences.min_price:
-            return 0.5  # Below minimum price is neutral
-        if normalized_price > preferences.max_price:
-            return 0.0  # Above maximum price is zero
-            
-        # Linear score between min and max price
-        price_range = preferences.max_price - preferences.min_price
-        if price_range <= 0:
-            return 1.0
-        return 1.0 - ((normalized_price - preferences.min_price) / price_range)
-
-    def _calculate_time_score(self, event: Event, preferences: UserPreferences) -> float:
-        """Calculate time-based relevance score."""
-        if not event.start_time:
-            return 0.5  # Neutral score if no time info
-            
-        now = datetime.utcnow()
-        days_until_event = (event.start_time - now).days
+        # Compute weighted sum
+        final_scores = (
+            self.weights['category'] * category_scores +
+            self.weights['location'] * location_scores +
+            self.weights['price'] * price_scores +
+            self.weights['time'] * time_scores +
+            self.weights['popularity'] * popularity_scores
+        )
         
-        # Immediate future events (0-7 days) get high scores
-        if 0 <= days_until_event <= 7:
-            return 0.85  # High but not maximum score
-        # Events 8-30 days away get decreasing scores
-        elif 8 <= days_until_event <= 30:
-            return 0.85 - (0.5 * (days_until_event - 7) / 23)  # Steeper decay
-        # Events 31-90 days away get lower decreasing scores
-        elif 31 <= days_until_event <= 90:
-            return 0.35 - (0.25 * (days_until_event - 30) / 60)  # Lower base score
-        # Events more than 90 days away get lowest scores
-        else:
-            return 0.1
-
-    def _calculate_popularity_score(self, event: Event) -> float:
-        """Calculate popularity-based score."""
-        # Normalize views/interactions if available
-        if hasattr(event, 'view_count') and event.view_count is not None:
-            return min(1.0, event.view_count / 1000)  # Arbitrary normalization
-        return 0.5  # Neutral score if no popularity data
+        return final_scores
 
     def get_personalized_recommendations(
         self,
@@ -145,15 +160,21 @@ class RecommendationEngine:
         Returns:
             List of recommended events, ordered by relevance
         """
-        # Score all events
-        scored_events = [
-            (event, self.score_event(event, preferences))
-            for event in events
-        ]
+        if not events:
+            return []
+            
+        # Score all events in batch
+        scores = self.score_events_batch(events, preferences)
         
-        # Sort by score (descending) and return top N events
-        scored_events.sort(key=lambda x: x[1], reverse=True)
-        return [event for event, _ in scored_events[:limit]]
+        # Get indices of top N scores
+        if limit:
+            top_indices = np.argpartition(scores, -min(limit, len(scores)))[-limit:]
+            top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+        else:
+            top_indices = np.argsort(scores)[::-1]
+        
+        # Return events in order of score
+        return [events[i] for i in top_indices]
 
     def get_trending_recommendations(
         self,
@@ -162,23 +183,42 @@ class RecommendationEngine:
         limit: int = 10
     ) -> List[Event]:
         """Get trending events based on recent popularity."""
+        if not events:
+            return []
+            
         now = datetime.utcnow()
         
-        # Filter for events within timeframe
-        recent_events = [
-            event for event in events
-            if event.start_time and (event.start_time - now).days <= timeframe_days
-        ]
+        # Filter for events within timeframe using vectorized operations
+        days_until = np.array([
+            (event.start_time - now).days if event.start_time else float('inf')
+            for event in events
+        ])
+        recent_mask = days_until <= timeframe_days
+        recent_events = [e for i, e in enumerate(events) if recent_mask[i]]
         
-        # Score based on views and recency
-        scored_events = []
-        for event in recent_events:
-            view_score = min(1.0, (event.view_count or 0) / 1000)
-            days_away = (event.start_time - now).days
-            recency_score = 1.0 - (days_away / timeframe_days)
-            final_score = (0.7 * view_score) + (0.3 * recency_score)
-            scored_events.append((event, final_score))
+        if not recent_events:
+            return []
         
-        # Sort by score and return top N
-        scored_events.sort(key=lambda x: x[1], reverse=True)
-        return [event for event, _ in scored_events[:limit]] 
+        # Score based on views and recency using vectorized operations
+        view_scores = np.minimum(1.0, np.array([
+            getattr(event, 'view_count', 0) or 0
+            for event in recent_events
+        ]) / 1000)
+        
+        days_until_recent = np.array([
+            (event.start_time - now).days
+            for event in recent_events
+        ])
+        recency_scores = 1.0 - (days_until_recent / timeframe_days)
+        
+        final_scores = (0.7 * view_scores) + (0.3 * recency_scores)
+        
+        # Get indices of top N scores
+        if limit:
+            top_indices = np.argpartition(final_scores, -min(limit, len(final_scores)))[-limit:]
+            top_indices = top_indices[np.argsort(final_scores[top_indices])[::-1]]
+        else:
+            top_indices = np.argsort(final_scores)[::-1]
+        
+        # Return events in order of score
+        return [recent_events[i] for i in top_indices] 

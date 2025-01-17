@@ -30,6 +30,9 @@ ENV/
 .env
 .venv
 nlp_service_account_key.json
+Prysm_Backend_Architecture_Analysis_Jan16_Update.md
+integration-testing-plan.md
+integration-test-specs.md
 
 # IDEs and editors
 .idea/

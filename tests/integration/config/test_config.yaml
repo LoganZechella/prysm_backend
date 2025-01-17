@@ -1,0 +1,22 @@
+database:
+  host: localhost
+  port: 5432
+  name: prysm_test_db
+  user: test_user
+  password: test_password
+
+mock_services:
+  event_source:
+    base_url: http://localhost:8001
+  recommendation:
+    base_url: http://localhost:8002
+
+test_data:
+  events_path: tests/integration/data/test_events.json
+  users_path: tests/integration/data/test_users.json
+  preferences_path: tests/integration/data/test_preferences.json
+
+monitoring:
+  enabled: true
+  metrics_port: 8089
+  trace_sampling_rate: 1.0 
