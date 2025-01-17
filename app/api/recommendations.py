@@ -12,7 +12,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-recommendation_service = RecommendationService()
 
 def create_sample_events(db: Session) -> None:
     """Create sample events if none exist."""
@@ -106,6 +105,9 @@ async def get_recommendations(
         # Get available events
         events = db.query(Event).all()
         
+        # Initialize recommendation service with db session
+        recommendation_service = RecommendationService(db)
+        
         # Generate recommendations
         recommendations = await recommendation_service.get_personalized_recommendations(
             preferences=preferences,
@@ -165,6 +167,9 @@ async def get_personalized_recommendations(
         # Get available events
         events = db.query(Event).all()
         
+        # Initialize recommendation service with db session
+        recommendation_service = RecommendationService(db)
+        
         # Generate recommendations
         recommendations = await recommendation_service.get_personalized_recommendations(
             preferences=preferences,
@@ -202,6 +207,9 @@ async def get_trending_recommendations(
     try:
         # Get available events
         events = db.query(Event).all()
+        
+        # Initialize recommendation service with db session
+        recommendation_service = RecommendationService(db)
         
         # Get trending recommendations
         trending = await recommendation_service.get_trending_recommendations(
@@ -247,6 +255,9 @@ async def get_similar_events(
         # Get available events
         events = db.query(Event).all()
         
+        # Initialize recommendation service with db session
+        recommendation_service = RecommendationService(db)
+        
         # Get similar events
         similar = await recommendation_service.get_similar_events(
             event=event,
@@ -256,8 +267,6 @@ async def get_similar_events(
         
         return similar
         
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error getting similar events: {str(e)}")
         raise HTTPException(
