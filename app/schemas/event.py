@@ -4,47 +4,34 @@ Event schema definitions.
 
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 class EventBase(BaseModel):
-    """Base Pydantic model for events."""
-    title: str
-    description: str
-    start_time: datetime
-    end_time: Optional[datetime] = None
-    location: Dict[str, Any]  # Dict with lat/lng
-    categories: List[str]
-    price_info: Optional[Dict[str, Any]] = None  # Dict with price details
-    source: str  # Source platform (e.g., "eventbrite")
-    source_id: str  # Original ID from source
-    url: Optional[str] = None  # Link to original event
-    image_url: Optional[str] = None
-    venue: Optional[Dict[str, Any]] = None  # Venue details
-    organizer: Optional[Dict[str, Any]] = None  # Organizer details
-    tags: Optional[List[str]] = None
-    view_count: int = 0
-    like_count: int = 0
+    """Base schema for events."""
+    user_id: str
+    provider: str
+    event_type: str
+    event_data: Dict[str, Any]
+    timestamp: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 class EventCreate(EventBase):
-    """Pydantic model for creating events."""
+    """Schema for creating events."""
     pass
 
 class Event(EventBase):
-    """Pydantic model for events in the database."""
+    """Schema for events with database fields."""
     id: int
     created_at: datetime
     updated_at: datetime
-    
-    class Config:
-        """Pydantic model configuration."""
-        from_attributes = True  # Allows conversion from SQLAlchemy models
+
+    model_config = ConfigDict(from_attributes=True)
 
 class EventResponse(EventBase):
-    """Pydantic model for event responses."""
+    """Schema for event responses."""
     id: int
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        """Pydantic model configuration."""
-        from_attributes = True  # Allows conversion from SQLAlchemy models 
+    model_config = ConfigDict(from_attributes=True) 

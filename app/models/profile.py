@@ -1,5 +1,6 @@
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, ConfigDict
+from datetime import datetime
 
 class LocationPreference(BaseModel):
     city: str
@@ -27,8 +28,8 @@ class UserProfile(BaseModel):
     interests: List[str] = Field(default_factory=list, description="General interests and hobbies")
     excluded_categories: List[str] = Field(default_factory=list, description="Categories to exclude")
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "user_id": "user123",
                 "name": "John Doe",
@@ -49,4 +50,15 @@ class UserProfile(BaseModel):
                 "interests": ["Live Music", "Technology", "Startups", "Food"],
                 "excluded_categories": ["Sports"]
             }
-        } 
+        }
+    )
+
+class Profile(BaseModel):
+    """Schema for user profiles."""
+    id: int
+    user_id: str
+    traits: Dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True) 

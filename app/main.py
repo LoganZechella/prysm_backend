@@ -1,42 +1,62 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-import logging
-import os
-from app.api import api_router
+from app.api.api_v1.api import api_router
+from app.core.config import settings
+from app.db.session import engine, Base
 from app.tasks.event_collection import EventCollectionTask
+import logging
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan events for the FastAPI application."""
+    # Startup
+    try:
+        logger.info("Creating database tables...")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created successfully")
+        
+        # Start event collection task
+        logger.info("Starting event collection task...")
+        event_task = EventCollectionTask()
+        await event_task.start()
+        logger.info("Event collection task started successfully")
+        
+    except Exception as e:
+        logger.error(f"Error during startup: {e}")
+        raise
+    
+    yield
+    
+    # Shutdown
+    try:
+        logger.info("Stopping event collection task...")
+        await event_task.stop()
+        logger.info("Event collection task stopped successfully")
+        
+        logger.info("Closing database connections...")
+        await engine.dispose()
+        logger.info("Database connections closed successfully")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+        raise
 
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    lifespan=lifespan
 )
 
-# Include API routes
-app.include_router(api_router)
+# Set up CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Event collection task instance
-event_collection_task = EventCollectionTask()
-
-@app.on_event("startup")
-async def startup_event():
-    """Start background tasks when the application starts"""
-    # Only start event collection task if not in test mode
-    if os.getenv("APP_ENV") != "test":
-        asyncio.create_task(event_collection_task.start())
-        logger.info("Started event collection task")
-    else:
-        logger.info("Skipping event collection task in test mode")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Stop background tasks when the application shuts down"""
-    await event_collection_task.stop()
-    logger.info("Stopped event collection task") 
+app.include_router(api_router, prefix=settings.API_V1_STR) 

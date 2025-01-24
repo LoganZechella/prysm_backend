@@ -1,4 +1,4 @@
-"""API routes for the application."""
+"""API module for the application."""
 
 from fastapi import APIRouter
 from app.api.recommendations import router as recommendations_router
