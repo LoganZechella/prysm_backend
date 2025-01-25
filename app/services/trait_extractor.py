@@ -1,21 +1,109 @@
-"""Service for extracting user traits from Spotify data."""
+"""Service for extracting user traits from various sources."""
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 
 from app.models.traits import Traits
 from app.services.spotify import SpotifyService
+from app.services.google.google_service import GooglePeopleService
 from app.core.cache import CacheManager, TRAIT_CACHE_TTL
 
 
 class TraitExtractor:
     """Service for extracting and managing user traits."""
 
-    def __init__(self, db: Session, spotify_service: SpotifyService):
+    def __init__(
+        self,
+        db: Session,
+        spotify_service: Optional[SpotifyService] = None,
+        google_service: Optional[GooglePeopleService] = None
+    ):
         """Initialize the trait extractor service."""
         self.db = db
         self.spotify_service = spotify_service
+        self.google_service = google_service
         self.cache = CacheManager()
+
+    async def update_user_traits(self, user_id: str) -> Traits:
+        """Update all traits for a user from all available sources."""
+        # Get existing traits or create new
+        traits = (
+            self.db.query(Traits)
+            .filter(Traits.user_id == user_id)
+            .first()
+        )
+
+        if not traits:
+            traits = Traits(user_id=user_id)
+            self.db.add(traits)
+
+        # Extract Spotify traits if service is available
+        if self.spotify_service:
+            spotify_traits = await self.spotify_service.extract_user_traits(user_id)
+            traits.music_traits = spotify_traits.get('music', {})
+            traits.social_traits = spotify_traits.get('social', {}).get('playlist_behavior', {})
+            traits.behavior_traits = spotify_traits.get('behavior', {}).get('listening_patterns', {})
+
+        # Extract Google traits if service is available
+        if self.google_service:
+            google_traits = await self.google_service.extract_professional_traits(user_id)
+            # Store Google traits in professional_traits field
+            traits.professional_traits = {
+                'organizations': google_traits.get('organizations', []),
+                'occupations': google_traits.get('occupations', []),
+                'locations': google_traits.get('locations', []),
+                'interests': google_traits.get('interests', []),
+                'skills': google_traits.get('skills', []),
+                'urls': google_traits.get('urls', []),
+                'source': 'google',
+                'last_updated': datetime.utcnow().isoformat()
+            }
+
+        # Update timestamps
+        traits.last_updated_at = datetime.utcnow()
+        traits.next_update_at = datetime.utcnow() + TRAIT_CACHE_TTL
+
+        # Save to database
+        self.db.commit()
+        self.db.refresh(traits)
+
+        return traits
+
+    async def get_user_traits(self, user_id: str) -> Optional[Traits]:
+        """Get all traits for a user."""
+        return (
+            self.db.query(Traits)
+            .filter(Traits.user_id == user_id)
+            .first()
+        )
+
+    async def get_professional_traits(self, user_id: str) -> Dict[str, Any]:
+        """Get professional traits for a user."""
+        traits = await self.get_user_traits(user_id)
+        if not traits or not traits.professional_traits:
+            return {}
+        return traits.professional_traits
+
+    async def get_music_traits(self, user_id: str) -> Dict[str, Any]:
+        """Get music traits for a user."""
+        traits = await self.get_user_traits(user_id)
+        if not traits or not traits.music_traits:
+            return {}
+        return traits.music_traits
+
+    async def get_social_traits(self, user_id: str) -> Dict[str, Any]:
+        """Get social traits for a user."""
+        traits = await self.get_user_traits(user_id)
+        if not traits or not traits.social_traits:
+            return {}
+        return traits.social_traits
+
+    async def get_behavior_traits(self, user_id: str) -> Dict[str, Any]:
+        """Get behavior traits for a user."""
+        traits = await self.get_user_traits(user_id)
+        if not traits or not traits.behavior_traits:
+            return {}
+        return traits.behavior_traits
 
     async def extract_music_traits(self, user_id: str) -> Dict[str, Any]:
         """Extract music-related traits from Spotify."""
@@ -106,35 +194,6 @@ class TraitExtractor:
         self.cache.set_traits(user_id, "behavior", behavior_traits)
         
         return behavior_traits
-
-    async def update_user_traits(self, user_id: str) -> Traits:
-        """Update all traits for a user."""
-        # Extract traits from Spotify
-        spotify_traits = await self.spotify_service.extract_user_traits(user_id)
-
-        # Get existing traits or create new
-        traits = (
-            self.db.query(Traits)
-            .filter(Traits.user_id == user_id)
-            .first()
-        )
-
-        if not traits:
-            traits = Traits(user_id=user_id)
-            self.db.add(traits)
-
-        # Update traits
-        traits.music_traits = spotify_traits.get('music', {})
-        traits.social_traits = spotify_traits.get('social', {}).get('playlist_behavior', {})
-        traits.behavior_traits = spotify_traits.get('behavior', {}).get('listening_patterns', {})
-        traits.last_updated_at = datetime.utcnow()
-        traits.next_update_at = datetime.utcnow() + TRAIT_CACHE_TTL
-
-        # Save to database
-        self.db.commit()
-        self.db.refresh(traits)
-
-        return traits
 
     def _extract_genre_preferences(self, artists: List[Dict[str, Any]]) -> Dict[str, float]:
         """Extract and score genre preferences from artists."""
