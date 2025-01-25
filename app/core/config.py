@@ -60,9 +60,13 @@ class Settings(BaseSettings):
     SPOTIFY_TEST_ACCESS_TOKEN: Optional[str] = None
     SPOTIFY_TEST_REFRESH_TOKEN: Optional[str] = None
     
-    GOOGLE_CLIENT_ID: Optional[str] = None
-    GOOGLE_CLIENT_SECRET: Optional[str] = None
-    GOOGLE_REDIRECT_URI: Optional[str] = None
+    # Google OAuth settings
+    GOOGLE_CLIENT_ID: str
+    GOOGLE_CLIENT_SECRET: str
+    GOOGLE_REDIRECT_URI: str
+    GOOGLE_PROJECT_ID: str
+    GOOGLE_TEST_ACCESS_TOKEN: Optional[str] = None
+    GOOGLE_TEST_REFRESH_TOKEN: Optional[str] = None
     
     LINKEDIN_CLIENT_ID: Optional[str] = None
     LINKEDIN_CLIENT_SECRET: Optional[str] = None
