@@ -117,8 +117,18 @@ async def spotify_auth_handler(request: Request):
     """Handle Spotify OAuth authorization."""
     try:
         client_id = os.getenv("SPOTIFY_CLIENT_ID")
-        redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8000/api/auth/spotify/callback")
-        scope = "user-read-private user-read-email playlist-read-private playlist-read-collaborative user-top-read"
+        redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8000/api/v1/auth/spotify/callback")
+        scope = " ".join([
+            'user-read-private',
+            'user-read-email',
+            'user-top-read',
+            'user-read-recently-played',
+            'playlist-read-private',
+            'playlist-read-collaborative',
+            'user-library-read',
+            'user-follow-read',
+            'user-follow-modify'
+        ])
         
         if not client_id:
             raise HTTPException(
@@ -167,22 +177,22 @@ async def spotify_callback_handler(
     """Handle Spotify OAuth callback."""
     if error:
         logger.error(f"Spotify authorization error: {error}")
-        return RedirectResponse(
-            url=f"http://localhost:3001/auth/dashboard?error={error}",
-            status_code=303
+        raise HTTPException(
+            status_code=400,
+            detail=f"Spotify authorization error: {error}"
         )
         
     try:
         # Exchange the authorization code for access token
         client_id = os.getenv("SPOTIFY_CLIENT_ID")
         client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-        redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8000/api/auth/spotify/callback")
+        redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8000/api/v1/auth/spotify/callback")
         
         if not client_id or not client_secret:
             logger.error("Spotify credentials not configured")
-            return RedirectResponse(
-                url="http://localhost:3001/auth/dashboard?error=configuration_error",
-                status_code=303
+            raise HTTPException(
+                status_code=500,
+                detail="Spotify credentials not configured"
             )
             
         # Create Spotify OAuth client
@@ -190,7 +200,17 @@ async def spotify_callback_handler(
             client_id=client_id,
             client_secret=client_secret,
             redirect_uri=redirect_uri,
-            scope="user-read-private user-read-email playlist-read-private playlist-read-collaborative user-top-read"
+            scope=" ".join([
+                'user-read-private',
+                'user-read-email',
+                'user-top-read',
+                'user-read-recently-played',
+                'playlist-read-private',
+                'playlist-read-collaborative',
+                'user-library-read',
+                'user-follow-read',
+                'user-follow-modify'
+            ])
         )
         
         # Exchange code for token
@@ -198,18 +218,18 @@ async def spotify_callback_handler(
         
         if not token_info:
             logger.error("Failed to exchange code for token")
-            return RedirectResponse(
-                url="http://localhost:3001/auth/dashboard?error=token_exchange_failed",
-                status_code=303
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to exchange code for token"
             )
         
         try:
             # Get user_id from state parameter
             if not state:
                 logger.error("No state parameter found")
-                return RedirectResponse(
-                    url="http://localhost:3001/auth/dashboard?error=no_session",
-                    status_code=303
+                raise HTTPException(
+                    status_code=400,
+                    detail="No state parameter found"
                 )
 
             try:
@@ -219,9 +239,9 @@ async def spotify_callback_handler(
                     raise jwt.InvalidTokenError("No user_id in token")
             except jwt.InvalidTokenError as e:
                 logger.error(f"Invalid state token: {str(e)}")
-                return RedirectResponse(
-                    url="http://localhost:3001/auth/dashboard?error=invalid_session",
-                    status_code=303
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid state token"
                 )
             
             # Store token in database
@@ -230,7 +250,11 @@ async def spotify_callback_handler(
                 provider="spotify",
                 access_token=token_info["access_token"],
                 refresh_token=token_info.get("refresh_token"),
-                expires_at=datetime.utcnow() + timedelta(seconds=token_info.get("expires_in", 3600))
+                expires_at=datetime.utcnow() + timedelta(seconds=token_info.get("expires_in", 3600)),
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=redirect_uri,
+                scope=token_info.get("scope", "")
             )
             
             # Update or insert token
@@ -249,23 +273,28 @@ async def spotify_callback_handler(
             db.commit()
             logger.info(f"Successfully stored Spotify token for user {user_id}")
             
-            return RedirectResponse(
-                url="http://localhost:3001/auth/dashboard?success=true",
-                status_code=303
-            )
+            return {
+                "status": "success",
+                "message": "Successfully authenticated with Spotify",
+                "user_id": user_id
+            }
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error storing token: {str(e)}")
-            return RedirectResponse(
-                url="http://localhost:3001/auth/dashboard?error=token_storage_failed",
-                status_code=303
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to store token"
             )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error handling Spotify callback: {str(e)}", exc_info=True)
-        return RedirectResponse(
-            url="http://localhost:3001/auth/dashboard?error=authorization_failed",
-            status_code=303
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to handle Spotify callback"
         )
 
 @router.post("/logout")
