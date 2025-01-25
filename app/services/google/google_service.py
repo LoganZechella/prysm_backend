@@ -134,46 +134,27 @@ class GooglePeopleService:
             logger.error(f"Error getting profile data: {str(e)}")
             return None
     
-    async def extract_professional_traits(self, user_id: str) -> Dict[str, Any]:
-        """Extract professional traits from Google People API data."""
-        profile_data = await self.get_profile_data(user_id)
-        if not profile_data:
-            return {}
+    async def extract_professional_traits(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Extract professional traits from Google profile data."""
+        try:
+            profile_data = await self.get_profile_data(user_id)
+            if not profile_data:
+                return None
+
+            # Structure the traits in a format compatible with our database
+            professional_traits = {
+                "urls": profile_data.get("urls", []),
+                "skills": profile_data.get("skills", []),
+                "interests": profile_data.get("interests", []),
+                "locations": profile_data.get("locations", []),
+                "occupations": profile_data.get("occupations", []),
+                "organizations": profile_data.get("organizations", []),
+                "last_updated": datetime.utcnow().isoformat()
+            }
             
-        professional_traits = {
-            'organizations': [
-                {
-                    'name': org.get('name', ''),
-                    'title': org.get('title', ''),
-                    'type': org.get('type', ''),
-                    'startDate': org.get('startDate', {}),
-                    'endDate': org.get('endDate', {})
-                }
-                for org in profile_data.get('organizations', [])
-            ],
-            'occupations': [
-                occupation.get('value', '')
-                for occupation in profile_data.get('occupations', [])
-            ],
-            'locations': [
-                location.get('value', '')
-                for location in profile_data.get('locations', [])
-            ],
-            'interests': [
-                interest.get('value', '')
-                for interest in profile_data.get('interests', [])
-            ],
-            'skills': [
-                skill.get('value', '')
-                for skill in profile_data.get('skills', [])
-            ],
-            'urls': [
-                {
-                    'value': url.get('value', ''),
-                    'type': url.get('type', '')
-                }
-                for url in profile_data.get('urls', [])
-            ]
-        }
-        
-        return professional_traits 
+            logger.info(f"Extracted Google professional traits: {professional_traits}")
+            return professional_traits
+            
+        except Exception as e:
+            logger.error(f"Error extracting Google professional traits: {str(e)}")
+            return None 
