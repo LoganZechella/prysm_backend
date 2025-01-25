@@ -6,8 +6,12 @@ from sqlalchemy.orm import Session
 from app.models.traits import Traits
 from app.services.spotify import SpotifyService
 from app.services.google.google_service import GooglePeopleService
+from app.services.linkedin.linkedin_service import LinkedInService
 from app.core.cache import CacheManager, TRAIT_CACHE_TTL
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 class TraitExtractor:
     """Service for extracting and managing user traits."""
@@ -16,94 +20,145 @@ class TraitExtractor:
         self,
         db: Session,
         spotify_service: Optional[SpotifyService] = None,
-        google_service: Optional[GooglePeopleService] = None
+        google_service: Optional[GooglePeopleService] = None,
+        linkedin_service: Optional[LinkedInService] = None
     ):
         """Initialize the trait extractor service."""
         self.db = db
         self.spotify_service = spotify_service
         self.google_service = google_service
+        self.linkedin_service = linkedin_service
         self.cache = CacheManager()
 
-    async def update_user_traits(self, user_id: str) -> Traits:
-        """Update all traits for a user from all available sources."""
-        # Get existing traits or create new
-        traits = (
-            self.db.query(Traits)
-            .filter(Traits.user_id == user_id)
-            .first()
-        )
+    async def update_user_traits(self, user_id: str) -> Optional[Traits]:
+        """Update traits for a user from all available sources."""
+        try:
+            # Get or create traits record
+            traits = self.db.query(Traits).filter_by(user_id=user_id).first()
+            if not traits:
+                traits = Traits(
+                    user_id=user_id,
+                    last_updated_at=datetime.utcnow(),
+                    next_update_at=datetime.utcnow() + timedelta(days=7),
+                    professional_traits={}
+                )
+                self.db.add(traits)
+            
+            # Initialize professional traits if not exists
+            if not traits.professional_traits:
+                traits.professional_traits = {}
+            
+            # Extract traits from each service
+            if self.spotify_service:
+                music_traits = await self.spotify_service.extract_music_traits(user_id)
+                social_traits = await self.spotify_service.extract_social_traits(user_id)
+                behavior_traits = await self.spotify_service.extract_behavior_traits(user_id)
+                
+                if music_traits:
+                    traits.music_traits = music_traits
+                if social_traits:
+                    traits.social_traits = social_traits
+                if behavior_traits:
+                    traits.behavior_traits = behavior_traits
+                    
+            # Extract Google professional traits
+            if self.google_service:
+                google_traits = await self.google_service.extract_professional_traits(user_id)
+                if google_traits:
+                    # Store Google traits in their own section
+                    traits.professional_traits["google"] = {
+                        "urls": google_traits.get("urls", []),
+                        "skills": google_traits.get("skills", []),
+                        "interests": google_traits.get("interests", []),
+                        "locations": google_traits.get("locations", []),
+                        "occupations": google_traits.get("occupations", []),
+                        "organizations": google_traits.get("organizations", []),
+                        "last_updated": google_traits.get("last_updated")
+                    }
+                    traits.professional_traits["last_google_update"] = datetime.utcnow().isoformat()
+                    
+            # Extract LinkedIn professional traits
+            if self.linkedin_service:
+                linkedin_traits = await self.linkedin_service.extract_professional_traits(user_id)
+                if linkedin_traits:
+                    # Store LinkedIn traits in their own section
+                    traits.professional_traits["linkedin"] = {
+                        "name": linkedin_traits.get("name"),
+                        "email": linkedin_traits.get("email"),
+                        "picture_url": linkedin_traits.get("picture_url"),
+                        "locale": linkedin_traits.get("locale"),
+                        "language": linkedin_traits.get("language"),
+                        "last_updated": linkedin_traits.get("last_updated"),
+                        "next_update": linkedin_traits.get("next_update")
+                    }
+                    traits.professional_traits["last_linkedin_update"] = datetime.utcnow().isoformat()
+            
+            traits.last_updated_at = datetime.utcnow()
+            traits.next_update_at = datetime.utcnow() + timedelta(days=7)
+            
+            # Explicitly commit the changes
+            self.db.commit()
+            logger.info(f"Successfully updated traits for user {user_id}")
+            logger.info(f"Professional traits after update: {traits.professional_traits}")
+            
+            return traits
+            
+        except Exception as e:
+            logger.error(f"Error updating traits for user {user_id}: {str(e)}")
+            return None
 
-        if not traits:
-            traits = Traits(user_id=user_id)
-            self.db.add(traits)
-
-        # Extract Spotify traits if service is available
-        if self.spotify_service:
-            spotify_traits = await self.spotify_service.extract_user_traits(user_id)
-            traits.music_traits = spotify_traits.get('music', {})
-            traits.social_traits = spotify_traits.get('social', {}).get('playlist_behavior', {})
-            traits.behavior_traits = spotify_traits.get('behavior', {}).get('listening_patterns', {})
-
-        # Extract Google traits if service is available
-        if self.google_service:
-            google_traits = await self.google_service.extract_professional_traits(user_id)
-            # Store Google traits in professional_traits field
-            traits.professional_traits = {
-                'organizations': google_traits.get('organizations', []),
-                'occupations': google_traits.get('occupations', []),
-                'locations': google_traits.get('locations', []),
-                'interests': google_traits.get('interests', []),
-                'skills': google_traits.get('skills', []),
-                'urls': google_traits.get('urls', []),
-                'source': 'google',
-                'last_updated': datetime.utcnow().isoformat()
-            }
-
-        # Update timestamps
-        traits.last_updated_at = datetime.utcnow()
-        traits.next_update_at = datetime.utcnow() + TRAIT_CACHE_TTL
-
-        # Save to database
-        self.db.commit()
-        self.db.refresh(traits)
-
-        return traits
-
-    async def get_user_traits(self, user_id: str) -> Optional[Traits]:
+    async def get_user_traits(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Get all traits for a user."""
-        return (
-            self.db.query(Traits)
-            .filter(Traits.user_id == user_id)
-            .first()
-        )
+        try:
+            traits = self.db.query(Traits).filter_by(user_id=user_id).first()
+            if not traits:
+                return None
+                
+            return {
+                "music_traits": traits.music_traits,
+                "social_traits": traits.social_traits,
+                "behavior_traits": traits.behavior_traits,
+                "professional_traits": traits.professional_traits,
+                "last_updated_at": traits.last_updated_at.isoformat() if traits.last_updated_at else None
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting traits for user {user_id}: {str(e)}")
+            return None
 
     async def get_professional_traits(self, user_id: str) -> Dict[str, Any]:
         """Get professional traits for a user."""
-        traits = await self.get_user_traits(user_id)
-        if not traits or not traits.professional_traits:
+        try:
+            traits = self.db.query(Traits).filter_by(user_id=user_id).first()
+            if not traits:
+                return {}
+                
+            return traits.professional_traits or {}
+            
+        except Exception as e:
+            logger.error(f"Error getting professional traits for user {user_id}: {str(e)}")
             return {}
-        return traits.professional_traits
 
     async def get_music_traits(self, user_id: str) -> Dict[str, Any]:
         """Get music traits for a user."""
         traits = await self.get_user_traits(user_id)
-        if not traits or not traits.music_traits:
+        if not traits or not traits.get("music_traits"):
             return {}
-        return traits.music_traits
+        return traits["music_traits"]
 
     async def get_social_traits(self, user_id: str) -> Dict[str, Any]:
         """Get social traits for a user."""
         traits = await self.get_user_traits(user_id)
-        if not traits or not traits.social_traits:
+        if not traits or not traits.get("social_traits"):
             return {}
-        return traits.social_traits
+        return traits["social_traits"]
 
     async def get_behavior_traits(self, user_id: str) -> Dict[str, Any]:
         """Get behavior traits for a user."""
         traits = await self.get_user_traits(user_id)
-        if not traits or not traits.behavior_traits:
+        if not traits or not traits.get("behavior_traits"):
             return {}
-        return traits.behavior_traits
+        return traits["behavior_traits"]
 
     async def extract_music_traits(self, user_id: str) -> Dict[str, Any]:
         """Extract music-related traits from Spotify."""
