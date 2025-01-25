@@ -17,21 +17,16 @@ logger = logging.getLogger(__name__)
 class FacebookScrapflyScraper(ScrapflyBaseScraper):
     """Scraper for Facebook events using Scrapfly"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, **kwargs):
         """Initialize the Facebook scraper"""
-        super().__init__(
-            api_key,
-            requests_per_second=1.0,  # Facebook has strict rate limits
-            max_retries=3,
-            error_threshold=0.2,
-            monitor_window=15,
-            circuit_failure_threshold=3
-        )
-        self.platform = "facebook"
+        super().__init__(api_key=api_key, platform='facebook', **kwargs)
         
-    def _get_request_config(self, url: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def _get_request_config(self, url: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Get Facebook-specific Scrapfly configuration"""
-        base_config = super()._get_request_config(url, config)
+        logger.debug(f"[facebook] Building request config for URL: {url}")
+        
+        base_config = await super()._get_request_config(url, config)
+        logger.debug(f"[facebook] Base config from parent: {json.dumps(base_config, indent=2)}")
         
         # Add Facebook-specific settings
         facebook_config = {
@@ -39,15 +34,43 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
             'asp': True,  # Enable anti-scraping protection
             'country': 'us',  # Set country for geo-targeting
             'premium_proxy': True,  # Use premium proxies for better success rate
+            'cookies': True,  # Enable cookie handling
+            'session': True,  # Enable session handling
+            'wait_for_selector': '[data-testid="event-card"], .event-card',  # Wait for content to load
+            'js_scenario': {
+                'steps': [
+                    {'wait': 3000},  # Initial wait for page load
+                    {'scroll_y': 500},  # First scroll
+                    {'wait': 1000},
+                    {'scroll_y': 1000},  # Second scroll
+                    {'wait': 1000},
+                    {'scroll_y': 1500},  # Final scroll
+                    {'wait': 2000}  # Final wait
+                ]
+            },
             'headers': {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/91.0.4472.114',
-                'Sec-Fetch-Site': 'same-origin',
-                'Sec-Fetch-Mode': 'navigate'
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'max-age=0',
+                'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"macOS"',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
             }
         }
         
-        return {**base_config, **facebook_config}
+        logger.debug(f"[facebook] Adding Facebook-specific config: {json.dumps(facebook_config, indent=2)}")
+        final_config = {**base_config, **facebook_config}
+        logger.debug(f"[facebook] Final merged config: {json.dumps(final_config, indent=2)}")
+        
+        return final_config
     
     async def scrape_events(
         self,
@@ -123,7 +146,10 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
         page: int
     ) -> str:
         """Build the Facebook search URL with parameters"""
-        base_url = "https://www.facebook.com/events/search"
+        base_url = "https://www.facebook.com/events/search/events"
+        
+        # Format location
+        location_str = f"{location['city'].lower()}-{location['state'].lower()}"
         
         # Format dates
         start_date = int(date_range['start'].timestamp())
@@ -131,10 +157,12 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
         
         # Build query parameters
         params = [
-            f"location={location['city']}%2C+{location['state']}",
-            f"start_time={start_date}",
-            f"end_time={end_date}",
-            f"page={page}"
+            f"place={location_str}",
+            f"start_date={start_date}",
+            f"end_date={end_date}",
+            f"page={page}",
+            "distance_unit=mile",
+            "distance=50"  # Search within 50 miles
         ]
         
         if categories:
@@ -168,20 +196,29 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
     def _parse_json_events(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
         """Parse events from embedded JSON data"""
         events = []
+        logger.debug("[facebook] Starting JSON event parsing")
         
         try:
             # Look for JSON data in script tags
             scripts = soup.find_all("script", {"type": "application/json"})
+            logger.debug(f"[facebook] Found {len(scripts)} JSON script tags")
+            
             for script in scripts:
                 try:
                     data = json.loads(script.string)
+                    logger.debug(f"[facebook] Parsed JSON data: {json.dumps(data, indent=2)}")
+                    
                     if not isinstance(data, dict):
+                        logger.debug("[facebook] Skipping non-dict JSON data")
                         continue
                     
                     # Look for event data in various JSON structures
                     event_data = data.get("eventData") or data.get("events") or data.get("data", {}).get("events")
                     if not event_data:
+                        logger.debug("[facebook] No event data found in JSON")
                         continue
+                    
+                    logger.debug(f"[facebook] Found event data: {json.dumps(event_data, indent=2)}")
                     
                     if isinstance(event_data, list):
                         for event in event_data:
@@ -194,14 +231,16 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
                             events.append(parsed_event)
                             
                 except json.JSONDecodeError:
+                    logger.warning("[facebook] Failed to parse JSON script tag")
                     continue
                 except Exception as e:
-                    logger.warning(f"Error parsing JSON event data: {str(e)}")
+                    logger.warning(f"[facebook] Error parsing JSON event data: {str(e)}")
                     continue
                     
         except Exception as e:
-            logger.error(f"Error parsing JSON data: {str(e)}")
+            logger.error(f"[facebook] Error parsing JSON data: {str(e)}")
             
+        logger.debug(f"[facebook] Found {len(events)} events in JSON")
         return events
     
     def _parse_json_event(self, event_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -262,25 +301,29 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
     def _parse_event_cards(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
         """Parse event cards from search results page"""
         events = []
+        logger.debug("[facebook] Starting event card parsing")
         
         try:
             # Find event cards using various possible class patterns
             event_cards = soup.find_all("div", {
                 "class": re.compile(r"event-card|event_card|eventCard")
             })
+            logger.debug(f"[facebook] Found {len(event_cards)} event cards")
             
             for card in event_cards:
                 try:
                     event = self._parse_event_card(card)
                     if event:
+                        logger.debug(f"[facebook] Parsed event: {json.dumps(event, indent=2, default=str)}")
                         events.append(event)
                 except Exception as e:
-                    logger.warning(f"Error parsing event card: {str(e)}")
+                    logger.warning(f"[facebook] Error parsing event card: {str(e)}")
                     continue
                     
         except Exception as e:
-            logger.error(f"Error parsing event cards: {str(e)}")
+            logger.error(f"[facebook] Error parsing event cards: {str(e)}")
             
+        logger.debug(f"[facebook] Found {len(events)} events in HTML")
         return events
     
     def _parse_event_card(self, card: BeautifulSoup) -> Optional[Dict[str, Any]]:
@@ -292,6 +335,7 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
                 {"class": re.compile(r".*title.*|.*name.*", re.I)}
             )
             if not title_elem:
+                logger.debug("[facebook] No title element found in card")
                 return None
             
             # Extract date and time
@@ -300,14 +344,17 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
                 {"class": re.compile(r".*time.*|.*date.*", re.I)}
             )
             if not date_elem:
+                logger.debug("[facebook] No date element found in card")
                 return None
             
             # Try to find the event URL and ID
             link = card.find("a", href=re.compile(r"/events/\d+"))
             if not link:
+                logger.debug("[facebook] No event link found in card")
                 return None
             
             event_id = re.search(r"/events/(\d+)", link["href"]).group(1)
+            logger.debug(f"[facebook] Found event ID: {event_id}")
             
             # Extract location info
             location_elem = card.find(
@@ -330,7 +377,7 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
             }
             
         except Exception as e:
-            logger.warning(f"Error parsing event card: {str(e)}")
+            logger.warning(f"[facebook] Error parsing event card: {str(e)}")
             return None
     
     def _parse_date(self, date_str: str) -> datetime:
