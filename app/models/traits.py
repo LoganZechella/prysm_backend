@@ -16,6 +16,7 @@ class Traits(Base):
     music_traits = Column(JSONB, nullable=False, server_default=text("'{}'"))
     social_traits = Column(JSONB, nullable=False, server_default=text("'{}'"))
     behavior_traits = Column(JSONB, nullable=False, server_default=text("'{}'"))
+    professional_traits = Column(JSONB, nullable=False, server_default=text("'{}'"))
     trait_metadata = Column(JSONB, nullable=False, server_default=text('\'{"version": 1}\''))
     last_updated_at = Column(DateTime(timezone=True), nullable=False)
     next_update_at = Column(DateTime(timezone=True), nullable=False)
