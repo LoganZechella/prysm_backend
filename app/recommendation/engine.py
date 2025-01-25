@@ -1,18 +1,33 @@
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+"""Core recommendation engine implementation."""
+import logging
+from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta
 import numpy as np
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_, func
+from sqlalchemy.dialects.postgresql import JSONB
 from app.models.event import Event
 from app.models.preferences import UserPreferences
 from app.services.location_recommendations import LocationService
 from app.services.price_normalization import PriceNormalizer
 from app.services.category_extraction import CategoryExtractor
+from app.models.traits import Traits
+from app.services.trait_extractor import TraitExtractor
+from app.recommendation.filters.content import ContentBasedFilter
+
+logger = logging.getLogger(__name__)
 
 class RecommendationEngine:
-    def __init__(self):
+    """Core recommendation engine for generating personalized event recommendations."""
+    
+    def __init__(self, db: Session):
+        """Initialize the recommendation engine."""
+        self.db = db
         self.location_service = LocationService()
         self.price_normalizer = PriceNormalizer()
         self.category_extractor = CategoryExtractor()
+        self.trait_extractor = TraitExtractor(db)
+        self.content_filter = ContentBasedFilter()
         
         # Scoring weights
         self.weights = {
@@ -22,6 +37,176 @@ class RecommendationEngine:
             'time': 0.15,
             'popularity': 0.10
         }
+
+    async def get_recommendations(
+        self,
+        user_id: str,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Get personalized event recommendations for a user."""
+        try:
+            # Get user traits
+            traits = self.db.query(Traits).filter_by(user_id=user_id).first()
+            if not traits:
+                logger.warning(f"No traits found for user {user_id}")
+                return []
+
+            # Process user traits
+            professional_traits = traits.professional_traits or {}
+            interest_traits = professional_traits.get("interests", [])
+            location_traits = self._process_location_traits(professional_traits)
+
+            # Get candidate events
+            candidate_events = await self._get_candidate_events(
+                categories=interest_traits,
+                location=location_traits,
+                filters=filters or {}
+            )
+
+            if not candidate_events:
+                logger.info("No candidate events found")
+                return []
+
+            # Score and rank events
+            scored_events = await self._score_events(candidate_events, professional_traits)
+
+            # Apply minimum score filter if specified
+            min_score = filters.get("min_score", 0.0) if filters else 0.0
+            scored_events = [
+                event for event in scored_events
+                if event["score"] >= min_score
+            ]
+
+            # Sort by score and start time
+            scored_events.sort(key=lambda x: (-x["score"], x["start_time"]))
+
+            return scored_events
+
+        except Exception as e:
+            logger.error(f"Error getting recommendations: {str(e)}")
+            return []
+
+    def _process_location_traits(self, professional_traits: Dict[str, Any]) -> Dict[str, str]:
+        """Process location traits from professional traits."""
+        location = professional_traits.get("location", {})
+        if not location:
+            logger.warning("No location found in professional traits")
+            return {"country": "US"}  # Default to US if no location found
+        return location
+
+    async def _get_candidate_events(
+        self,
+        categories: List[str],
+        location: Dict[str, str],
+        filters: Dict[str, Any]
+    ) -> List[Event]:
+        """Get candidate events based on user preferences and filters."""
+        try:
+            # Start with base query
+            query = self.db.query(Event)
+
+            # Filter future events
+            query = query.filter(Event.start_time >= datetime.utcnow())
+
+            # Filter by categories if provided
+            if categories:
+                category_conditions = [
+                    func.array_to_string(Event.categories, ',', '').ilike(f"%{category}%")
+                    for category in categories
+                ]
+                query = query.filter(or_(*category_conditions))
+
+            # Filter by location if provided
+            if location:
+                query = query.filter(Event.location.cast(JSONB).contains({"country": location["country"]}))
+
+            # Filter by max price if provided
+            if filters.get("max_price"):
+                query = query.filter(
+                    Event.price_info.cast(JSONB).contains({"amount": filters["max_price"]})
+                )
+
+            # Filter by sources if provided
+            if filters.get("sources"):
+                query = query.filter(Event.source.in_(filters["sources"]))
+
+            # Order by start time and limit results
+            query = query.order_by(Event.start_time).limit(100)
+
+            return query.all()
+
+        except Exception as e:
+            logger.error(f"Error getting candidate events: {str(e)}")
+            return []
+
+    async def _score_events(
+        self,
+        events: List[Event],
+        professional_traits: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Score events based on user preferences."""
+        scored_events = []
+
+        for event in events:
+            try:
+                # Calculate similarity score using content-based filter
+                score = self.content_filter.calculate_similarity(
+                    event_features=event.get_feature_vector(),
+                    user_traits=professional_traits
+                )
+
+                # Create event dict with score and explanation
+                event_dict = event.to_dict()
+                event_dict["score"] = score
+                event_dict["explanation"] = self._generate_explanation(
+                    event, professional_traits, score
+                )
+
+                scored_events.append(event_dict)
+
+            except Exception as e:
+                logger.error(f"Error scoring event {event.id}: {str(e)}")
+                continue
+
+        return scored_events
+
+    def _generate_explanation(
+        self,
+        event: Event,
+        professional_traits: Dict[str, Any],
+        score: float
+    ) -> str:
+        """Generate human-readable explanation for recommendation."""
+        reasons = []
+
+        # Check category matches
+        user_interests = professional_traits.get("interests", [])
+        matching_categories = [
+            cat for cat in event.categories
+            if any(interest.lower() in cat.lower() for interest in user_interests)
+        ]
+        if matching_categories:
+            reasons.append(
+                f"Matches your interests in {', '.join(matching_categories)}"
+            )
+
+        # Check location match
+        user_location = professional_traits.get("location", {}).get("country")
+        event_location = event.location.get("country")
+        if user_location and event_location and user_location == event_location:
+            reasons.append(f"Located in {event_location}")
+
+        # Add time-based reason
+        time_until_event = event.start_time - datetime.utcnow()
+        if time_until_event <= timedelta(days=7):
+            reasons.append("Happening this week")
+        elif time_until_event <= timedelta(days=30):
+            reasons.append("Happening this month")
+
+        if not reasons:
+            return "Based on your general preferences"
+
+        return "; ".join(reasons)
 
     def score_events_batch(
         self,

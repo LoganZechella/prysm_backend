@@ -12,18 +12,23 @@ This module provides the base scraper implementation with common functionality:
 
 import logging
 import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable, Awaitable, TypeVar, Generic, Union
 from datetime import datetime
 import aiohttp
 from bs4 import BeautifulSoup
+import asyncio
+import json
+import re
 
 from app.utils.rate_limiter import RateLimiter
-from app.utils.retry_handler import RetryHandler
+from app.utils.retry_handler import RetryHandler, RetryError
 from app.utils.monitoring import ScraperMonitor
 from app.utils.circuit_breaker import CircuitBreaker, CircuitBreakerError
 from app.utils.scraper_config import ScraperConfig
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar('T')
 
 class ScrapflyError(Exception):
     """Base exception for Scrapfly-related errors"""
@@ -37,12 +42,13 @@ class ScrapflyResponseError(ScrapflyError):
     """Raised when Scrapfly returns an error response"""
     pass
 
-class ScrapflyBaseScraper:
+class ScrapflyBaseScraper(Generic[T]):
     """Base class for Scrapfly-based scrapers"""
     
     def __init__(
         self,
         api_key: str,
+        platform: str,
         requests_per_second: float = 2.0,
         max_retries: int = 3,
         error_threshold: float = 0.3,
@@ -55,6 +61,7 @@ class ScrapflyBaseScraper:
         
         Args:
             api_key: Scrapfly API key
+            platform: Platform name (eventbrite, meetup, facebook)
             requests_per_second: Maximum requests per second
             max_retries: Maximum number of retry attempts
             error_threshold: Maximum acceptable error rate
@@ -64,7 +71,11 @@ class ScrapflyBaseScraper:
         """
         self.api_key = api_key
         self.session = None
-        self.platform = None  # Must be set by subclasses
+        self.platform = platform.lower()  # Store platform name in lowercase
+        
+        # Initialize Scrapfly client
+        from scrapfly import ScrapeConfig, ScrapflyClient
+        self.scrapfly = ScrapflyClient(key=api_key)
         
         # Initialize utilities
         self.rate_limiter = RateLimiter(
@@ -77,7 +88,7 @@ class ScrapflyBaseScraper:
             max_retries=max_retries,
             base_delay=1.0,
             max_delay=30.0,
-            jitter=True
+            jitter='true'
         )
         
         self.monitor = ScraperMonitor(
@@ -90,6 +101,23 @@ class ScrapflyBaseScraper:
             recovery_timeout=circuit_recovery_timeout
         )
         
+    async def reset(self) -> None:
+        """Reset the scraper state to initial conditions"""
+        # Reset circuit breaker state
+        self.circuit_breaker.reset()
+        
+        # Clear monitoring history
+        self.monitor.clear_history()
+        
+        # Reset rate limiter
+        self.rate_limiter.reset()
+        
+        # Close and reinitialize session
+        await self._close_session()
+        await self._init_session()
+        
+        logger.info("Scraper reset to initial state")
+            
     async def _init_session(self) -> None:
         """Initialize aiohttp session if not already initialized"""
         if self.session is None:
@@ -101,7 +129,7 @@ class ScrapflyBaseScraper:
             await self.session.close()
             self.session = None
             
-    def _should_retry(self, error: Exception) -> bool:
+    def _should_retry(self, error: Exception) -> str:
         """
         Determine if an error should trigger a retry attempt.
         
@@ -109,144 +137,108 @@ class ScrapflyBaseScraper:
             error: The exception that occurred
             
         Returns:
-            True if the error should trigger a retry, False otherwise
+            'true' if the error should trigger a retry, 'false' otherwise
         """
         # Don't retry rate limit errors
         if isinstance(error, ScrapflyRateLimitError):
-            return False
+            return 'false'
+            
+        # Don't retry circuit breaker errors
+        if isinstance(error, CircuitBreakerError):
+            return 'false'
             
         # Retry network errors and 5xx responses
         if isinstance(error, (aiohttp.ClientError, ScrapflyResponseError)):
-            return True
+            return 'true'
             
-        return False
+        return 'false'
         
-    def _get_request_config(self, url: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Get request configuration for the current platform.
-        
-        Args:
-            url: Target URL to scrape
-            config: Optional configuration overrides
-            
-        Returns:
-            Complete request configuration
-        """
-        if not self.platform:
-            raise ValueError("Platform must be set by subclass")
-            
-        # Get platform-specific configuration
-        platform_config = ScraperConfig.get_config(self.platform)
-        proxy_config = ScraperConfig.get_proxy_config(self.platform)
-        
-        # Merge configurations in order of precedence
-        request_config = {
-            **platform_config,
-            **proxy_config,
-            'api_key': self.api_key,
-            'url': url
+    async def _get_request_config(self, url: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Get base Scrapfly configuration"""
+        base_config = {
+            'url': url,
+            'render_js': True,  # Enable JavaScript rendering by default
+            'asp': True,  # Enable anti-scraping protection
+            'country': 'us',  # Set country for geo-targeting
+            'headers': {
+                'Accept-Language': 'en-US,en;q=0.9',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
         }
         
-        # Apply any custom overrides
+        # Merge with provided config if any
         if config:
-            request_config.update(config)
+            base_config.update(config)
             
-        return request_config
+        return base_config
         
     async def _make_request(
         self,
         url: str,
-        config: Optional[Dict[str, Any]] = None
-    ) -> BeautifulSoup:
-        """
-        Make a request to Scrapfly API with rate limiting and retries.
-        
-        Args:
-            url: Target URL to scrape
-            config: Optional Scrapfly configuration overrides
-            
-        Returns:
-            BeautifulSoup object of the parsed response
-            
-        Raises:
-            ScrapflyError: If the request fails after all retries
-        """
-        start_time = time.monotonic()
-        request_context = {'url': url}
-        
+        config: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None
+    ) -> Union[BeautifulSoup, str]:
+        """Make a request using Scrapfly"""
         try:
-            async def execute_request():
-                await self._init_session()
-                request_config = self._get_request_config(url, config)
+            request_config = await self._get_request_config(url, config)
+            
+            # Create ScrapeConfig object with correct parameters
+            from scrapfly import ScrapeConfig
+            scrape_config = ScrapeConfig(
+                url=url,
+                render_js=request_config.get('render_js', True),
+                asp=request_config.get('asp', True),
+                headers=request_config.get('headers', {}),
+                cookies={},  # Initialize empty cookies dict
+                body=json_data if json_data else None,
+                method=request_config.get('method', 'GET')
+            )
+            
+            # Make request
+            result = await self.scrapfly.async_scrape(scrape_config)
+            
+            if not result:
+                logger.warning(f"[{self.platform}] Empty response from Scrapfly")
+                return None
                 
-                # Acquire rate limit token
-                async with self.rate_limiter:
-                    async with self.session.get(
-                        'https://api.scrapfly.io/scrape',
-                        params=request_config
-                    ) as response:
-                        # Handle error responses
-                        if response.status == 429:
-                            raise ScrapflyRateLimitError("Scrapfly rate limit exceeded")
-                        elif response.status >= 400:
-                            raise ScrapflyResponseError(
-                                f"Scrapfly API error: {response.status} - {await response.text()}"
-                            )
-                            
-                        # Parse successful response
-                        data = await response.json()
-                        if not data.get('result', {}).get('content'):
-                            raise ScrapflyResponseError("Empty response from Scrapfly")
-                            
-                        return BeautifulSoup(
-                            data['result']['content'],
-                            'html.parser'
-                        )
-                        
-            # Execute with circuit breaker protection
-            result = await self.circuit_breaker.execute(
-                lambda: self.retry_handler.execute_with_retry(
-                    execute_request,
-                    should_retry=self._should_retry
-                )
-            )
+            logger.debug(f"[{self.platform}] Response status: {result.status_code}")
+            logger.debug(f"[{self.platform}] Response headers: {dict(result.headers)}")
             
-            # Record successful request
-            self.monitor.record_request(
-                self.platform,
-                success=True,
-                response_time=time.monotonic() - start_time,
-                context=request_context
-            )
+            content = result.content
+            if not content:
+                logger.warning(f"[{self.platform}] Empty content in response")
+                return None
+                
+            logger.debug(f"[{self.platform}] Response content type: {type(content)}")
+            logger.debug(f"[{self.platform}] First 2000 chars of response: {content[:2000]}")
             
-            return result
+            # For JSON requests, return raw content
+            if json_data:
+                return content
+                
+            # For HTML requests, parse with BeautifulSoup
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Check for error pages
+            error_indicators = [
+                "Access Denied",
+                "Security Check",
+                "Captcha",
+                "Too Many Requests",
+                "Rate Limit Exceeded"
+            ]
+            
+            page_text = soup.get_text().lower()
+            if any(indicator.lower() in page_text for indicator in error_indicators):
+                logger.warning(f"[{self.platform}] Detected error page")
+                raise ScrapflyError("Received error page instead of content")
+                
+            return soup
             
         except Exception as e:
-            # Record failed request
-            self.monitor.record_request(
-                self.platform,
-                success=False,
-                response_time=time.monotonic() - start_time,
-                context=request_context
-            )
-            
-            # Record error
-            self.monitor.record_error(
-                self.platform,
-                error=e,
-                context=request_context
-            )
-            
-            logger.error(
-                f"Failed to scrape {url}",
-                extra={
-                    'scraper': self.platform,
-                    'error': str(e),
-                    'url': url
-                }
-            )
+            logger.error(f"[{self.platform}] Request failed: {str(e)}")
             raise
-            
+        
     async def scrape_events(
         self,
         location: Dict[str, Any],

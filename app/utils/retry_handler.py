@@ -1,38 +1,38 @@
 """
-Retry handler implementation for managing request retries.
+Retry handler implementation for handling transient failures.
 
-This module provides a RetryHandler class that implements exponential backoff
-for retrying failed requests. It supports:
-- Maximum retry attempts
+This module provides a RetryHandler class that implements retry logic:
+- Configurable retry attempts
 - Exponential backoff with jitter
-- Configurable retry conditions
-- Detailed retry statistics
+- Custom retry conditions
+- Retry statistics and monitoring
 """
 
-import asyncio
-import random
 import logging
-from typing import Callable, Optional, Any, Dict, List
+import random
+import asyncio
+from typing import TypeVar, Callable, Awaitable, Optional, Any, Literal
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar('T')
+
 class RetryError(Exception):
-    """Exception raised when all retry attempts have failed"""
+    """Exception raised when all retry attempts fail"""
     
-    def __init__(self, message: str, last_error: Optional[Exception] = None):
-        """Initialize retry error"""
+    def __init__(self, message: str, original_error: Optional[Exception] = None):
         super().__init__(message)
-        self.last_error = last_error
+        self.original_error = original_error
 
 class RetryHandler:
-    """Handles request retries with exponential backoff"""
+    """Handler for retrying operations with exponential backoff"""
     
     def __init__(
         self,
         max_retries: int = 3,
         base_delay: float = 1.0,
-        max_delay: float = 60.0,
+        max_delay: float = 30.0,
         jitter: bool = True
     ):
         """
@@ -40,147 +40,140 @@ class RetryHandler:
         
         Args:
             max_retries: Maximum number of retry attempts
-            base_delay: Initial delay between retries in seconds
+            base_delay: Base delay between retries in seconds
             max_delay: Maximum delay between retries in seconds
             jitter: Whether to add random jitter to delays
         """
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
-        self.jitter = jitter
+        self.jitter = 'true' if jitter else 'false'
         
-        # Stats for monitoring
-        self.stats = {
-            'total_attempts': 0,
-            'successful_retries': 0,
-            'failed_retries': 0,
-            'total_retry_delay': 0.0
-        }
+        # Statistics
+        self.total_retries = 0
+        self.successful_retries = 0
+        self.failed_retries = 0
+        self.last_retry = None
         
-        # Track recent failures for monitoring
-        self.recent_failures: List[Dict[str, Any]] = []
+    def reset(self) -> None:
+        """Reset retry statistics"""
+        self.total_retries = 0
+        self.successful_retries = 0
+        self.failed_retries = 0
+        self.last_retry = None
+        logger.debug("Retry handler statistics reset")
         
     def _calculate_delay(self, attempt: int) -> float:
         """
         Calculate delay for current retry attempt.
         
         Args:
-            attempt: Current retry attempt number (1-based)
+            attempt: Current retry attempt number
             
         Returns:
             Delay in seconds
         """
+        # Calculate exponential backoff
         delay = min(
-            self.max_delay,
-            self.base_delay * (2 ** (attempt - 1))
+            self.base_delay * (2 ** attempt),
+            self.max_delay
         )
         
-        if self.jitter:
+        if self.jitter == 'true':
             # Add random jitter between -25% and +25%
-            jitter_range = delay * 0.25
-            delay += random.uniform(-jitter_range, jitter_range)
+            jitter = random.uniform(-0.25, 0.25)
+            delay = delay * (1 + jitter)
             
-        return max(0, delay)
+        logger.debug(f"Calculated retry delay: {delay:.2f}s for attempt {attempt}")
+        return delay
         
     async def execute_with_retry(
         self,
-        operation: Callable,
-        should_retry: Optional[Callable[[Exception], bool]] = None,
-        *args,
-        **kwargs
-    ) -> Any:
+        operation: Callable[[], Awaitable[T]],
+        should_retry: Optional[Callable[[Exception], Literal['true', 'false']]] = None
+    ) -> T:
         """
         Execute an operation with retries.
         
         Args:
-            operation: Async function to execute
+            operation: Async operation to execute
             should_retry: Optional function to determine if an error should trigger retry
-            *args: Positional arguments for operation
-            **kwargs: Keyword arguments for operation
             
         Returns:
-            Result from successful operation execution
+            Result of successful operation
             
         Raises:
-            RetryError: When all retry attempts fail
+            RetryError: If all retry attempts fail
         """
-        last_exception = None
-        attempt = 0
+        last_error = None
+        start_time = datetime.utcnow()
         
-        while attempt <= self.max_retries:
+        for attempt in range(self.max_retries + 1):
             try:
-                self.stats['total_attempts'] += 1
-                result = await operation(*args, **kwargs)
+                if attempt > 0:
+                    delay = self._calculate_delay(attempt - 1)
+                    logger.info(
+                        f"Retrying operation after {delay:.2f}s "
+                        f"(attempt {attempt}/{self.max_retries}, "
+                        f"elapsed: {(datetime.utcnow() - start_time).total_seconds():.1f}s)"
+                    )
+                    await asyncio.sleep(delay)
+                    
+                # Execute the operation and await its result
+                result = await operation()
                 
                 if attempt > 0:
-                    self.stats['successful_retries'] += 1
+                    self.successful_retries += 1
+                    self.last_retry = datetime.utcnow()
+                    logger.info(
+                        f"Operation succeeded after {attempt} "
+                        f"retries in {(datetime.utcnow() - start_time).total_seconds():.1f}s"
+                    )
                     
                 return result
                 
             except Exception as e:
-                last_exception = e
-                attempt += 1
+                last_error = e
                 
-                # Check if we should retry this error
-                if should_retry and not should_retry(e):
-                    logger.info(
-                        f"Not retrying operation after attempt {attempt} due to error type: {type(e).__name__}"
+                if attempt < self.max_retries:
+                    # Check if we should retry this error
+                    retry_result = should_retry(e) if callable(should_retry) else 'true'
+                    if retry_result == 'false':
+                        logger.info(
+                            f"Not retrying operation due to error type: {type(e).__name__}\n"
+                            f"Error: {str(e)}"
+                        )
+                        break
+                        
+                    self.total_retries += 1
+                    logger.warning(
+                        f"Operation failed (attempt {attempt + 1}/{self.max_retries})\n"
+                        f"Error: {str(e)}\n"
+                        f"Elapsed time: {(datetime.utcnow() - start_time).total_seconds():.1f}s"
                     )
-                    break
-                    
-                # Check if we've exceeded max retries
-                if attempt > self.max_retries:
-                    self.stats['failed_retries'] += 1
-                    self._record_failure(operation.__name__, str(e))
+                else:
+                    self.failed_retries += 1
                     logger.error(
-                        f"Operation failed after {attempt} attempts. Last error: {str(e)}"
+                        f"Operation failed after {self.max_retries} retries\n"
+                        f"Error: {str(e)}\n"
+                        f"Total time: {(datetime.utcnow() - start_time).total_seconds():.1f}s"
                     )
-                    break
                     
-                # Calculate and apply backoff delay
-                delay = self._calculate_delay(attempt)
-                self.stats['total_retry_delay'] += delay
-                
-                logger.warning(
-                    f"Retry attempt {attempt}/{self.max_retries} after error: {str(e)}. "
-                    f"Waiting {delay:.2f}s before next attempt."
-                )
-                
-                await asyncio.sleep(delay)
-                
-        if last_exception:
-            raise RetryError(
-                f"Operation failed after {attempt} attempts",
-                last_error=last_exception
-            )
-            
-    def _record_failure(self, operation: str, error: str) -> None:
-        """Record a failed operation for monitoring"""
-        self.recent_failures.append({
-            'timestamp': datetime.utcnow(),
-            'operation': operation,
-            'error': error
-        })
+        raise RetryError(
+            f"Operation failed after {attempt} attempts ({(datetime.utcnow() - start_time).total_seconds():.1f}s)",
+            original_error=last_error
+        )
         
-        # Keep only last 100 failures
-        if len(self.recent_failures) > 100:
-            self.recent_failures.pop(0)
-            
-    def get_stats(self) -> Dict[str, Any]:
-        """Get current retry statistics"""
+    def get_stats(self) -> dict:
+        """Get retry statistics"""
         return {
-            'total_attempts': self.stats['total_attempts'],
-            'successful_retries': self.stats['successful_retries'],
-            'failed_retries': self.stats['failed_retries'],
+            'total_retries': self.total_retries,
+            'successful_retries': self.successful_retries,
+            'failed_retries': self.failed_retries,
             'success_rate': (
-                (self.stats['successful_retries'] / self.stats['total_attempts'] * 100)
-                if self.stats['total_attempts'] > 0
-                else 100.0
+                self.successful_retries / self.total_retries 
+                if self.total_retries > 0 else 0
             ),
-            'average_retry_delay': (
-                self.stats['total_retry_delay'] / self.stats['successful_retries']
-                if self.stats['successful_retries'] > 0
-                else 0.0
-            ),
-            'recent_failures': self.recent_failures[-5:]  # Last 5 failures
+            'last_retry': self.last_retry.isoformat() if self.last_retry else None,
+            'jitter_enabled': self.jitter
         } 

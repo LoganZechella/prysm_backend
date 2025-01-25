@@ -6,6 +6,8 @@ optimizing settings for each platform's anti-bot measures and requirements.
 """
 
 from typing import Dict, Any
+import json
+import base64
 
 class ScraperConfig:
     """Platform-specific scraper configurations"""
@@ -13,10 +15,10 @@ class ScraperConfig:
     # Eventbrite specific settings
     EVENTBRITE_CONFIG = {
         'country': 'US',
-        'asp': True,
-        'render_js': True,
+        'asp': 'true',
+        'render_js': 'true',
         'proxy_pool': 'residential',  # Use residential proxies for better success
-        'session': True,
+        'session': 'true',
         'timeout': 30,
         'headers': {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -35,17 +37,17 @@ class ScraperConfig:
         'browser_settings': {
             'viewport': {'width': 1920, 'height': 1080},
             'platform': 'Windows',
-            'mobile': False
+            'mobile': 'false'
         }
     }
     
     # Meetup specific settings
     MEETUP_CONFIG = {
         'country': 'US',
-        'asp': True,
-        'render_js': True,
+        'asp': 'true',
+        'render_js': 'true',
         'proxy_pool': 'residential',
-        'session': True,
+        'session': 'true',
         'timeout': 30,
         'headers': {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -59,17 +61,17 @@ class ScraperConfig:
         'browser_settings': {
             'viewport': {'width': 1366, 'height': 768},
             'platform': 'MacOS',
-            'mobile': False
+            'mobile': 'false'
         }
     }
     
     # Facebook specific settings
     FACEBOOK_CONFIG = {
         'country': 'US',
-        'asp': True,
-        'render_js': True,
+        'asp': 'true',
+        'render_js': 'true',
         'proxy_pool': 'residential',
-        'session': True,
+        'session': 'true',
         'timeout': 45,  # Longer timeout for Facebook's complex loading
         'headers': {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -87,7 +89,7 @@ class ScraperConfig:
         'browser_settings': {
             'viewport': {'width': 1920, 'height': 1080},
             'platform': 'Windows',
-            'mobile': False
+            'mobile': 'false'
         },
         'wait_for': '.event-card',  # Wait for event cards to load
         'wait_timeout': 10
@@ -110,23 +112,55 @@ class ScraperConfig:
             'facebook': cls.FACEBOOK_CONFIG
         }
         
+        # Create JavaScript scenario as a list of actions
+        js_scenario = [
+            {'wait': 2000},  # Initial wait for page load
+            {'execute': 'window.scrollTo(0, 800);'},  # Scroll down
+            {'wait': 1000},  # Wait for dynamic content
+            {'execute': 'window.scrollTo(0, 1600);'},  # Scroll more
+            {'wait': 1000}  # Final wait
+        ]
+        
+        # Base64 encode the JavaScript scenario
+        js_scenario_json = json.dumps(js_scenario)
+        js_scenario_base64 = base64.b64encode(js_scenario_json.encode()).decode()
+        
         base_config = {
-            'retry_enabled': True,
+            'retry_enabled': 'true',
             'retry_count': 2,
-            'cookies_enabled': True,
-            'js_scenario': {
-                'steps': [
-                    {'wait': 2000},  # Initial wait for page load
-                    {'scroll_y': 800},  # Scroll down
-                    {'wait': 1000},  # Wait for dynamic content
-                    {'scroll_y': 1600},  # Scroll more
-                    {'wait': 1000}  # Final wait
-                ]
-            }
+            'cookies_enabled': 'true',
+            'js_scenario': js_scenario_base64
         }
         
         platform_config = configs.get(platform.lower(), {})
-        return {**base_config, **platform_config}
+        config = {**base_config, **platform_config}
+        
+        # Convert any remaining boolean values to strings
+        for key, value in config.items():
+            if key == 'headers' and isinstance(value, dict):
+                config[key] = json.dumps(value)
+            elif key == 'browser_settings' and isinstance(value, dict):
+                cls._convert_bools_to_strings(value)
+                config[key] = json.dumps(value)
+            elif isinstance(value, bool):
+                config[key] = str(value).lower()
+                    
+        return config
+        
+    @classmethod
+    def _convert_bools_to_strings(cls, data: Dict[str, Any]) -> None:
+        """Convert boolean values to strings in a dictionary recursively"""
+        for key, value in data.items():
+            if isinstance(value, bool):
+                data[key] = str(value).lower()
+            elif isinstance(value, dict):
+                cls._convert_bools_to_strings(value)
+            elif isinstance(value, list):
+                for i, item in enumerate(value):
+                    if isinstance(item, bool):
+                        value[i] = str(item).lower()
+                    elif isinstance(item, dict):
+                        cls._convert_bools_to_strings(item)
         
     @classmethod
     def get_proxy_config(cls, platform: str) -> Dict[str, Any]:
@@ -142,7 +176,7 @@ class ScraperConfig:
         return {
             'proxy_pool': 'residential',
             'proxy_country': 'US',
-            'proxy_session': True,  # Maintain session with same IP
+            'proxy_session': 'true',  # Maintain session with same IP
             'proxy_timeout': 30,
-            'proxy_retry': True
+            'proxy_retry': 'true'
         } 
