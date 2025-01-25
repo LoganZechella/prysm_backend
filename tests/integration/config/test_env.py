@@ -6,6 +6,39 @@ from pathlib import Path
 
 logger = setup_logger(__name__)
 
+# Default test environment variables
+test_env = {
+    # Database
+    'DATABASE_URL': 'postgresql://logan@localhost:5432/prysm_test',
+    
+    # Spotify
+    'SPOTIFY_CLIENT_ID': os.getenv('SPOTIFY_CLIENT_ID'),
+    'SPOTIFY_CLIENT_SECRET': os.getenv('SPOTIFY_CLIENT_SECRET'),
+    'SPOTIFY_REDIRECT_URI': os.getenv('SPOTIFY_REDIRECT_URI'),
+    'SPOTIFY_TEST_ACCESS_TOKEN': os.getenv('SPOTIFY_TEST_ACCESS_TOKEN'),
+    'SPOTIFY_TEST_REFRESH_TOKEN': os.getenv('SPOTIFY_TEST_REFRESH_TOKEN'),
+    
+    # Google
+    'GOOGLE_CLIENT_ID': os.getenv('GOOGLE_CLIENT_ID'),
+    'GOOGLE_CLIENT_SECRET': os.getenv('GOOGLE_CLIENT_SECRET'),
+    'GOOGLE_REDIRECT_URI': os.getenv('GOOGLE_REDIRECT_URI'),
+    
+    # LinkedIn
+    'LINKEDIN_CLIENT_ID': os.getenv('LINKEDIN_CLIENT_ID'),
+    'LINKEDIN_CLIENT_SECRET': os.getenv('LINKEDIN_CLIENT_SECRET'),
+    'LINKEDIN_REDIRECT_URI': os.getenv('LINKEDIN_REDIRECT_URI'),
+    
+    # JWT
+    'JWT_SECRET_KEY': 'test-secret-key',
+    'JWT_ALGORITHM': 'HS256',
+    'ACCESS_TOKEN_EXPIRE_MINUTES': '30',
+    
+    # App
+    'APP_ENV': 'test',
+    'DEBUG': 'true',
+    'LOG_LEVEL': 'DEBUG'
+}
+
 def setup_test_env() -> Dict[str, Any]:
     """Set up test environment variables."""
     print("\nSetting up test environment...")
@@ -29,41 +62,15 @@ def setup_test_env() -> Dict[str, Any]:
     except ImportError:
         print("python-dotenv not installed, skipping .env file load")
     
-    env_vars = {
-        # Database
-        'DATABASE_URL': 'postgresql://logan@localhost:5432/prysm_test',
-        
-        # Spotify
-        'SPOTIFY_CLIENT_ID': os.getenv('SPOTIFY_CLIENT_ID'),
-        'SPOTIFY_CLIENT_SECRET': os.getenv('SPOTIFY_CLIENT_SECRET'),
-        'SPOTIFY_REDIRECT_URI': os.getenv('SPOTIFY_REDIRECT_URI'),
-        'SPOTIFY_TEST_ACCESS_TOKEN': os.getenv('SPOTIFY_TEST_ACCESS_TOKEN'),
-        'SPOTIFY_TEST_REFRESH_TOKEN': os.getenv('SPOTIFY_TEST_REFRESH_TOKEN'),
-        
-        # Google
-        'GOOGLE_CLIENT_ID': os.getenv('GOOGLE_CLIENT_ID'),
-        'GOOGLE_CLIENT_SECRET': os.getenv('GOOGLE_CLIENT_SECRET'),
-        'GOOGLE_REDIRECT_URI': os.getenv('GOOGLE_REDIRECT_URI'),
-        
-        # LinkedIn
-        'LINKEDIN_CLIENT_ID': os.getenv('LINKEDIN_CLIENT_ID'),
-        'LINKEDIN_CLIENT_SECRET': os.getenv('LINKEDIN_CLIENT_SECRET'),
-        'LINKEDIN_REDIRECT_URI': os.getenv('LINKEDIN_REDIRECT_URI'),
-        
-        # JWT
-        'JWT_SECRET_KEY': 'test-secret-key',
-        'JWT_ALGORITHM': 'HS256',
-        'ACCESS_TOKEN_EXPIRE_MINUTES': '30',
-        
-        # App
-        'APP_ENV': 'test',
-        'DEBUG': 'true',
-        'LOG_LEVEL': 'DEBUG'
-    }
+    # Update test_env with any values from environment
+    for key in test_env:
+        env_value = os.getenv(key)
+        if env_value is not None:
+            test_env[key] = env_value
     
     # Print all environment variables (with sensitive data masked)
     print("\nEnvironment variables being set:")
-    for key, value in env_vars.items():
+    for key, value in test_env.items():
         if value is None:
             print(f"{key}: Not set")
         elif any(sensitive in key.lower() for sensitive in ['secret', 'token', 'key']):
@@ -73,7 +80,7 @@ def setup_test_env() -> Dict[str, Any]:
             print(f"{key}: {value}")
     
     # Set environment variables
-    for key, value in env_vars.items():
+    for key, value in test_env.items():
         if value is not None:
             os.environ[key] = str(value)
             
@@ -93,4 +100,4 @@ def setup_test_env() -> Dict[str, Any]:
     else:
         print("\nAll critical environment variables are set")
     
-    return env_vars 
+    return test_env 
