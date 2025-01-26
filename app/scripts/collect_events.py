@@ -8,7 +8,7 @@ import pytz
 from sqlalchemy import func
 from app.db.session import SessionLocal
 from app.services.event_collection import EventCollectionService
-from app.models.event import Event
+from app.models.event import EventModel
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -111,7 +111,7 @@ async def collect_events():
             for event_data in events:
                 try:
                     # Check if event already exists
-                    existing = db.query(Event).filter_by(
+                    existing = db.query(EventModel).filter_by(
                         source=event_data['source'],
                         source_id=event_data['event_id']
                     ).first()
@@ -121,7 +121,7 @@ async def collect_events():
                         continue
                     
                     # Create new event
-                    event = Event(
+                    event = EventModel(
                         title=event_data['title'],
                         description=event_data.get('description', ''),
                         start_time=to_utc_datetime(event_data['start_time']),
@@ -151,8 +151,8 @@ async def collect_events():
             logger.info(f"Successfully stored {new_events_count} new events")
             
             # Get statistics
-            total_events = db.query(Event).count()
-            events_by_source = db.query(Event.source, func.count(Event.id)).group_by(Event.source).all()
+            total_events = db.query(EventModel).count()
+            events_by_source = db.query(EventModel.source, func.count(EventModel.id)).group_by(EventModel.source).all()
             
             logger.info(f"Total events in database: {total_events}")
             logger.info("Events by source:")

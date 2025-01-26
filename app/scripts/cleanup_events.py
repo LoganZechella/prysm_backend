@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from sqlalchemy import func
 from app.db.session import SessionLocal
-from app.models.event import Event
+from app.models.event import EventModel  # Changed from Event to EventModel
 
 # Configure logging
 logging.basicConfig(
@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def is_valid_event(event: Event) -> bool:
+def is_valid_event(event: EventModel) -> bool:
     """Check if an event has all required fields"""
     return all([
         event.title,  # Must have a title
@@ -29,7 +29,7 @@ def cleanup_events():
     db = SessionLocal()
     try:
         # Get all events
-        all_events = db.query(Event).all()
+        all_events = db.query(EventModel).all()
         logger.info(f"Found {len(all_events)} total events")
         
         # Find invalid events
@@ -54,11 +54,11 @@ def cleanup_events():
             logger.info(f"Successfully removed {len(invalid_events)} invalid events")
             
             # Get remaining events count
-            remaining_count = db.query(Event).count()
+            remaining_count = db.query(EventModel).count()
             logger.info(f"Remaining valid events: {remaining_count}")
             
             # Get events by source
-            events_by_source = db.query(Event.source, func.count(Event.id)).group_by(Event.source).all()
+            events_by_source = db.query(EventModel.source, func.count(EventModel.id)).group_by(EventModel.source).all()
             logger.info("\nRemaining events by source:")
             for source, count in events_by_source:
                 logger.info(f"  {source}: {count}")

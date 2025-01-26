@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
     # Database settings
-    DATABASE_URL: str = "postgresql://localhost/prysm"
+    DATABASE_URL: str = "postgresql://logan@localhost:5432/prysm"
     POSTGRESQL_CONNECTION_URI: Optional[str] = None
     
     # OAuth settings

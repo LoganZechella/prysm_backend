@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 import os
 from typing import Generator
 
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./events.db")
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://logan@localhost:5432/prysm")
 
 # Sync engine for scripts and sync operations
 engine = create_engine(

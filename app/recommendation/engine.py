@@ -6,7 +6,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
 from sqlalchemy.dialects.postgresql import JSONB
-from app.models.event import Event
+from app.models.event import EventModel
 from app.models.preferences import UserPreferences
 from app.services.location_recommendations import LocationService
 from app.services.price_normalization import PriceNormalizer
@@ -99,39 +99,45 @@ class RecommendationEngine:
         categories: List[str],
         location: Dict[str, str],
         filters: Dict[str, Any]
-    ) -> List[Event]:
+    ) -> List[EventModel]:
         """Get candidate events based on user preferences and filters."""
         try:
             # Start with base query
-            query = self.db.query(Event)
+            query = self.db.query(EventModel)
 
             # Filter future events
-            query = query.filter(Event.start_time >= datetime.utcnow())
+            query = query.filter(EventModel.start_datetime >= datetime.utcnow())
 
             # Filter by categories if provided
             if categories:
                 category_conditions = [
-                    func.array_to_string(Event.categories, ',', '').ilike(f"%{category}%")
+                    func.array_to_string(EventModel.categories, ',', '').ilike(f"%{category}%")
                     for category in categories
                 ]
                 query = query.filter(or_(*category_conditions))
 
             # Filter by location if provided
             if location:
-                query = query.filter(Event.location.cast(JSONB).contains({"country": location["country"]}))
-
-            # Filter by max price if provided
-            if filters.get("max_price"):
                 query = query.filter(
-                    Event.price_info.cast(JSONB).contains({"amount": filters["max_price"]})
+                    and_(
+                        EventModel.venue_city == location.get('city'),
+                        EventModel.venue_state == location.get('state'),
+                        EventModel.venue_country == location.get('country')
+                    )
                 )
 
-            # Filter by sources if provided
-            if filters.get("sources"):
-                query = query.filter(Event.source.in_(filters["sources"]))
+            # Filter by max price if provided
+            if filters and filters.get("max_price"):
+                query = query.filter(
+                    EventModel.price_info['max_price'].astext.cast(Float) <= filters["max_price"]
+                )
+
+            # Filter by platforms if provided
+            if filters and filters.get("platforms"):
+                query = query.filter(EventModel.platform.in_(filters["platforms"]))
 
             # Order by start time and limit results
-            query = query.order_by(Event.start_time).limit(100)
+            query = query.order_by(EventModel.start_datetime).limit(100)
 
             return query.all()
 
@@ -141,38 +147,46 @@ class RecommendationEngine:
 
     async def _score_events(
         self,
-        events: List[Event],
+        events: List[EventModel],
         professional_traits: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Score events based on user preferences."""
+        """Score events based on user traits and preferences."""
         scored_events = []
-
+        
         for event in events:
-            try:
-                # Calculate similarity score using content-based filter
-                score = self.content_filter.calculate_similarity(
-                    event_features=event.get_feature_vector(),
-                    user_traits=professional_traits
-                )
-
-                # Create event dict with score and explanation
-                event_dict = event.to_dict()
-                event_dict["score"] = score
-                event_dict["explanation"] = self._generate_explanation(
-                    event, professional_traits, score
-                )
-
-                scored_events.append(event_dict)
-
-            except Exception as e:
-                logger.error(f"Error scoring event {event.id}: {str(e)}")
-                continue
-
-        return scored_events
+            score = 0.0
+            explanation = []
+            
+            # Basic scoring based on event metadata
+            if event.rsvp_count:
+                popularity_score = min(event.rsvp_count / 100, 1.0)
+                score += popularity_score * 0.3
+                explanation.append(f"Popular event with {event.rsvp_count} RSVPs")
+            
+            # Location-based scoring
+            if event.venue_lat and event.venue_lon:
+                location_score = self.location_service.calculate_location_score(event)
+                score += location_score * 0.2
+                explanation.append("Good location match")
+            
+            # Category matching
+            if professional_traits.get("interests"):
+                matching_categories = set(event.categories or []) & set(professional_traits["interests"])
+                if matching_categories:
+                    score += len(matching_categories) * 0.1
+                    explanation.append(f"Matches interests: {', '.join(matching_categories)}")
+            
+            scored_events.append({
+                "event": event,
+                "score": score,
+                "explanation": explanation
+            })
+        
+        return sorted(scored_events, key=lambda x: x["score"], reverse=True)
 
     def _generate_explanation(
         self,
-        event: Event,
+        event: EventModel,
         professional_traits: Dict[str, Any],
         score: float
     ) -> str:
@@ -192,12 +206,12 @@ class RecommendationEngine:
 
         # Check location match
         user_location = professional_traits.get("location", {}).get("country")
-        event_location = event.location.get("country")
+        event_location = event.venue_country
         if user_location and event_location and user_location == event_location:
             reasons.append(f"Located in {event_location}")
 
         # Add time-based reason
-        time_until_event = event.start_time - datetime.utcnow()
+        time_until_event = event.start_datetime - datetime.utcnow()
         if time_until_event <= timedelta(days=7):
             reasons.append("Happening this week")
         elif time_until_event <= timedelta(days=30):
@@ -210,7 +224,7 @@ class RecommendationEngine:
 
     def score_events_batch(
         self,
-        events: List[Event],
+        events: List[EventModel],
         preferences: UserPreferences
     ) -> np.ndarray:
         """
@@ -292,7 +306,7 @@ class RecommendationEngine:
         
         # Batch compute time scores
         days_until = np.array([
-            (event.start_time - now).days if event.start_time else float('inf')
+            (event.start_datetime - now).days if event.start_datetime else float('inf')
             for event in events
         ])
         
@@ -330,16 +344,16 @@ class RecommendationEngine:
 
     def get_personalized_recommendations(
         self,
+        events: List[EventModel],
         preferences: UserPreferences,
-        events: List[Event],
         limit: int = 10
-    ) -> List[Event]:
+    ) -> List[EventModel]:
         """
         Generate personalized event recommendations for a user.
         
         Args:
-            preferences: User's preference settings
             events: List of available events to choose from
+            preferences: User's preference settings
             limit: Maximum number of recommendations to return
             
         Returns:
@@ -363,47 +377,72 @@ class RecommendationEngine:
 
     def get_trending_recommendations(
         self,
-        events: List[Event],
+        events: List[EventModel],
         timeframe_days: int = 7,
         limit: int = 10
-    ) -> List[Event]:
+    ) -> List[EventModel]:
         """Get trending events based on recent popularity."""
         if not events:
             return []
             
-        now = datetime.utcnow()
+        # Filter events within timeframe
+        cutoff_date = datetime.utcnow() - timedelta(days=timeframe_days)
+        recent_events = [
+            event for event in events 
+            if event.start_datetime and event.start_datetime >= cutoff_date
+        ]
         
-        # Filter for events within timeframe using vectorized operations
-        days_until = np.array([
-            (event.start_time - now).days if event.start_time else float('inf')
-            for event in events
-        ])
-        recent_mask = days_until <= timeframe_days
-        recent_events = [e for i, e in enumerate(events) if recent_mask[i]]
+        # Sort by popularity (RSVP count)
+        trending = sorted(
+            recent_events,
+            key=lambda x: (x.rsvp_count or 0),
+            reverse=True
+        )
         
-        if not recent_events:
+        return trending[:limit]
+
+    def get_similar_recommendations(
+        self,
+        reference_event: EventModel,
+        candidate_events: List[EventModel],
+        limit: int = 10
+    ) -> List[EventModel]:
+        """Find events similar to a reference event."""
+        if not reference_event or not candidate_events:
             return []
+            
+        similar_events = []
+        ref_categories = set(reference_event.categories or [])
         
-        # Score based on views and recency using vectorized operations
-        view_scores = np.minimum(1.0, np.array([
-            getattr(event, 'view_count', 0) or 0
-            for event in recent_events
-        ]) / 1000)
+        for event in candidate_events:
+            if event.id == reference_event.id:
+                continue
+                
+            similarity_score = 0
+            
+            # Category similarity
+            event_categories = set(event.categories or [])
+            if ref_categories and event_categories:
+                category_similarity = len(ref_categories & event_categories) / len(ref_categories | event_categories)
+                similarity_score += category_similarity * 0.4
+            
+            # Location similarity
+            if (reference_event.venue_lat and reference_event.venue_lon and 
+                event.venue_lat and event.venue_lon):
+                location_similarity = self.location_service.calculate_similarity(
+                    reference_event, event
+                )
+                similarity_score += location_similarity * 0.3
+            
+            # Time proximity
+            if reference_event.start_datetime and event.start_datetime:
+                time_diff = abs((reference_event.start_datetime - event.start_datetime).total_seconds())
+                time_similarity = 1.0 / (1.0 + time_diff / (24 * 3600))  # Normalize to 1 day
+                similarity_score += time_similarity * 0.3
+            
+            similar_events.append((event, similarity_score))
         
-        days_until_recent = np.array([
-            (event.start_time - now).days
-            for event in recent_events
-        ])
-        recency_scores = 1.0 - (days_until_recent / timeframe_days)
+        # Sort by similarity score
+        similar_events.sort(key=lambda x: x[1], reverse=True)
         
-        final_scores = (0.7 * view_scores) + (0.3 * recency_scores)
-        
-        # Get indices of top N scores
-        if limit:
-            top_indices = np.argpartition(final_scores, -min(limit, len(final_scores)))[-limit:]
-            top_indices = top_indices[np.argsort(final_scores[top_indices])[::-1]]
-        else:
-            top_indices = np.argsort(final_scores)[::-1]
-        
-        # Return events in order of score
-        return [recent_events[i] for i in top_indices] 
+        return [event for event, _ in similar_events[:limit]] 

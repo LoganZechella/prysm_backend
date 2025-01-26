@@ -8,6 +8,7 @@ import logging
 import json
 from bs4 import BeautifulSoup
 import re
+from scrapfly import ScrapeConfig
 
 from app.scrapers.base import ScrapflyBaseScraper, ScrapflyError
 from app.utils.retry_handler import RetryError
@@ -21,6 +22,23 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
         """Initialize the Eventbrite scraper"""
         super().__init__(api_key=api_key, platform='eventbrite', **kwargs)
         
+    async def _make_request(self, url: str) -> Optional[BeautifulSoup]:
+        """Make a request to Eventbrite and return BeautifulSoup object"""
+        try:
+            logger.debug(f"[eventbrite] Making request to: {url}")
+            config = await self._get_request_config(url)
+            result = await self.client.async_scrape(ScrapeConfig(**config))
+            
+            if not result.success:
+                logger.error(f"[eventbrite] Request failed: {result.error}")
+                return None
+                
+            return BeautifulSoup(result.content, 'html.parser')
+            
+        except Exception as e:
+            logger.error(f"[eventbrite] Request error: {str(e)}")
+            return None
+    
     async def _get_request_config(self, url: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Get Eventbrite-specific Scrapfly configuration"""
         logger.debug(f"[eventbrite] Building request config for URL: {url}")
@@ -30,24 +48,11 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
         
         # Add Eventbrite-specific settings
         eventbrite_config = {
+            'url': url,
             'render_js': True,  # Enable JavaScript rendering
             'asp': True,  # Enable anti-scraping protection
-            'country': 'us',  # Set country for geo-targeting
-            'premium_proxy': True,  # Use premium proxies for better success rate
-            'cookies': True,  # Enable cookie handling
-            'session': True,  # Enable session handling
-            'wait_for_selector': '.eds-event-card, .event-card',  # Wait for content to load
-            'js_scenario': {
-                'steps': [
-                    {'wait': 3000},  # Initial wait for page load
-                    {'scroll_y': 500},  # First scroll
-                    {'wait': 1000},
-                    {'scroll_y': 1000},  # Second scroll
-                    {'wait': 1000},
-                    {'scroll_y': 1500},  # Final scroll
-                    {'wait': 2000}  # Final wait
-                ]
-            },
+            'country': 'US',
+            'tags': ['eventbrite', 'events'],
             'headers': {
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -159,23 +164,17 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
         page: int
     ) -> str:
         """Build the Eventbrite search URL with parameters"""
-        base_url = "https://www.eventbrite.com/d/united-states"
+        base_url = "https://www.eventbrite.com/d"
         
         # Format location
-        location_str = f"{location['city'].lower()}-{location['state'].lower()}"
+        location_str = f"{location['state'].lower()}--{location['city'].lower()}"
         
-        # Format dates
-        start_date = date_range['start'].strftime("%Y-%m-%d")
-        end_date = date_range['end'].strftime("%Y-%m-%d")
+        # Build URL path
+        path = f"/{location_str}/events--next-week"
         
         # Build query parameters
         params = [
-            f"--{location_str}",
-            "events",
-            f"?page={page}",
-            f"start_date={start_date}",
-            f"end_date={end_date}",
-            "miles=50"  # Search within 50 miles
+            f"page={page}"
         ]
         
         if categories:
@@ -185,9 +184,8 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
                 params.append(f"categories={','.join(category_ids)}")
         
         # Construct final URL
-        path = '/'.join(p for p in params[:-1] if not p.startswith('?'))
-        query = '&'.join([p for p in params if p.startswith('?') or p.startswith('categories=') or p.startswith('miles=')])
-        return f"{base_url}/{path}?{query[1:] if query.startswith('?') else query}"
+        query = '&'.join(params)
+        return f"{base_url}{path}/?{query}"
     
     def _map_categories(self, categories: List[str]) -> List[str]:
         """Map generic categories to Eventbrite category IDs"""
