@@ -2,7 +2,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, HTTPException
 from datetime import datetime, timedelta
 from app.services.recommendation import RecommendationService
-from app.models.event import Event
+from app.models.event import EventModel
 from app.models.preferences import UserPreferences
 from app.schemas.event import EventResponse
 from app.database import get_db
@@ -15,9 +15,9 @@ router = APIRouter()
 
 def create_sample_events(db: Session) -> None:
     """Create sample events if none exist."""
-    if db.query(Event).count() == 0:
+    if db.query(EventModel).count() == 0:
         sample_events = [
-            Event(
+            EventModel(
                 title="Tech Conference 2025",
                 description="Join us for the biggest tech conference of the year!",
                 start_time=datetime.utcnow() + timedelta(days=7),
@@ -35,7 +35,7 @@ def create_sample_events(db: Session) -> None:
                 view_count=1000,
                 like_count=500
             ),
-            Event(
+            EventModel(
                 title="Summer Music Festival",
                 description="A weekend of amazing live music performances!",
                 start_time=datetime.utcnow() + timedelta(days=14),
@@ -53,7 +53,7 @@ def create_sample_events(db: Session) -> None:
                 view_count=2000,
                 like_count=1500
             ),
-            Event(
+            EventModel(
                 title="Food & Wine Expo",
                 description="Experience the finest cuisines and wines from around the world!",
                 start_time=datetime.utcnow() + timedelta(days=21),
@@ -103,7 +103,7 @@ async def get_recommendations(
             preferences = UserPreferences(user_id=user_id)
             
         # Get available events
-        events = db.query(Event).all()
+        events = db.query(EventModel).all()
         
         # Initialize recommendation service with db session
         recommendation_service = RecommendationService(db)
@@ -135,177 +135,111 @@ async def get_recommendations(
 
 @router.get("/personalized", response_model=List[EventResponse])
 async def get_personalized_recommendations(
-    user_id: str = Depends(get_current_user),
     db: Session = Depends(get_db),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None
-) -> List[Event]:
+    limit: int = Query(10, ge=1, le=100)
+) -> List[EventModel]:
     """
     Get personalized event recommendations for the current user.
-    
-    Args:
-        user_id: Current authenticated user
-        page: Page number for pagination
-        page_size: Number of items per page
-        start_date: Optional start date filter
-        end_date: Optional end date filter
-    
-    Returns:
-        List of recommended events
     """
     try:
-        # Get user preferences
-        preferences = db.query(UserPreferences).filter(
-            UserPreferences.user_id == user_id
-        ).first()
-        
-        if not preferences:
-            preferences = UserPreferences(user_id=user_id)
-            
         # Get available events
-        events = db.query(Event).all()
+        events = db.query(EventModel).all()
         
         # Initialize recommendation service with db session
         recommendation_service = RecommendationService(db)
         
-        # Generate recommendations
-        recommendations = await recommendation_service.get_personalized_recommendations(
-            preferences=preferences,
-            events=events,
-            limit=page_size,
-            start_date=start_date,
-            end_date=end_date
-        )
-        
+        # Get personalized recommendations
+        recommendations = recommendation_service.get_personalized_recommendations(events, limit=limit)
         return recommendations
         
     except Exception as e:
-        logger.error(f"Error getting personalized recommendations: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get recommendations"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/trending", response_model=List[EventResponse])
-async def get_trending_recommendations(
+async def get_trending_events(
     db: Session = Depends(get_db),
     timeframe_days: int = Query(7, ge=1, le=30),
     limit: int = Query(10, ge=1, le=100)
-) -> List[Event]:
+) -> List[EventModel]:
     """
     Get trending events based on popularity and recency.
-    
-    Args:
-        timeframe_days: Number of days to consider for trending
-        limit: Maximum number of recommendations to return
-    
-    Returns:
-        List of trending events
     """
     try:
         # Get available events
-        events = db.query(Event).all()
+        events = db.query(EventModel).all()
         
         # Initialize recommendation service with db session
         recommendation_service = RecommendationService(db)
         
         # Get trending recommendations
-        trending = await recommendation_service.get_trending_recommendations(
-            events=events,
+        recommendations = recommendation_service.get_trending_recommendations(
+            events,
             timeframe_days=timeframe_days,
             limit=limit
         )
-        
-        return trending
+        return recommendations
         
     except Exception as e:
-        logger.error(f"Error getting trending recommendations: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get trending events"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/similar/{event_id}", response_model=List[EventResponse])
 async def get_similar_events(
     event_id: int,
     db: Session = Depends(get_db),
     limit: int = Query(10, ge=1, le=100)
-) -> List[Event]:
+) -> List[EventModel]:
     """
     Get events similar to a given event.
-    
-    Args:
-        event_id: ID of the reference event
-        limit: Maximum number of similar events to return
-    
-    Returns:
-        List of similar events
     """
     try:
         # Get reference event
-        event = db.query(Event).filter(Event.id == event_id).first()
+        event = db.query(EventModel).filter(EventModel.id == event_id).first()
         if not event:
             raise HTTPException(
                 status_code=404,
-                detail="Event not found"
+                detail=f"Event with id {event_id} not found"
             )
             
         # Get available events
-        events = db.query(Event).all()
+        events = db.query(EventModel).all()
         
         # Initialize recommendation service with db session
         recommendation_service = RecommendationService(db)
         
-        # Get similar events
-        similar = await recommendation_service.get_similar_events(
-            event=event,
-            events=events,
+        # Get similar recommendations
+        recommendations = recommendation_service.get_similar_recommendations(
+            event,
+            events,
             limit=limit
         )
+        return recommendations
         
-        return similar
-        
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Error getting similar events: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get similar events"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/category/{category}", response_model=List[EventResponse])
 async def get_category_recommendations(
     category: str,
     db: Session = Depends(get_db),
     limit: int = Query(10, ge=1, le=100)
-) -> List[Event]:
+) -> List[EventModel]:
     """
     Get recommendations for a specific category.
-    
-    Args:
-        category: Target category
-        limit: Maximum number of recommendations to return
-    
-    Returns:
-        List of recommended events in the category
     """
     try:
         # Get available events
-        events = db.query(Event).all()
+        events = db.query(EventModel).all()
         
         # Get category recommendations
-        category_events = await recommendation_service.get_category_recommendations(
-            category=category,
-            events=events,
+        recommendation_service = RecommendationService(db)
+        recommendations = recommendation_service.get_category_recommendations(
+            category,
+            events,
             limit=limit
         )
-        
-        return category_events
+        return recommendations
         
     except Exception as e:
-        logger.error(f"Error getting category recommendations: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get category recommendations"
-        ) 
+        raise HTTPException(status_code=500, detail=str(e)) 

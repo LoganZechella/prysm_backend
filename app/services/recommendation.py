@@ -2,7 +2,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 import logging
 from sqlalchemy.orm import Session
-from app.models.event import Event
+from app.models.event import EventModel  # Changed from Event to EventModel
 from app.models.preferences import UserPreferences
 from app.recommendation.engine import RecommendationEngine
 from app.services.location_recommendations import LocationService
@@ -31,7 +31,7 @@ class RecommendationService:
         pagination: Optional[PaginationParams] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
-    ) -> Tuple[List[Event], Dict[str, Any]]:
+    ) -> Tuple[List[EventModel], Dict[str, Any]]:
         """
         Generate personalized event recommendations based on user preferences.
         
@@ -103,7 +103,7 @@ class RecommendationService:
         self,
         timeframe_days: int = 7,
         pagination: Optional[PaginationParams] = None
-    ) -> Tuple[List[Event], Dict[str, Any]]:
+    ) -> Tuple[List[EventModel], Dict[str, Any]]:
         """
         Get trending events based on popularity and recency.
         
@@ -164,7 +164,7 @@ class RecommendationService:
         self,
         event_id: int,
         limit: int = 10
-    ) -> List[Event]:
+    ) -> List[EventModel]:
         """
         Find events similar to a given event.
         
@@ -221,7 +221,7 @@ class RecommendationService:
         self,
         category: str,
         pagination: Optional[PaginationParams] = None
-    ) -> Tuple[List[Event], Dict[str, Any]]:
+    ) -> Tuple[List[EventModel], Dict[str, Any]]:
         """
         Get recommendations for a specific category.
         

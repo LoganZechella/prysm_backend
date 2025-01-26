@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
 # Test database URL
-TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/test_db"
+TEST_DATABASE_URL = "postgresql+asyncpg://logan@localhost:5432/test_db"
 
 # Test Scrapfly API key
 TEST_SCRAPFLY_API_KEY = "test_key"

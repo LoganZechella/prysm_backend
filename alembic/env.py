@@ -23,7 +23,7 @@ Base = declarative_base()
 # Import all models that need to be included in migrations
 from app.models.traits import Traits
 from app.models.oauth import OAuthToken
-from app.models.event import Event
+from app.models.event import EventModel
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -46,7 +46,10 @@ target_metadata = Base.metadata
 
 def get_url():
     """Get database URL based on environment."""
-    return os.getenv('DATABASE_URL', 'postgresql://logan@localhost:5432/prysm')
+    return os.getenv(
+        'DATABASE_URL',
+        'postgresql://logan@localhost:5432/prysm'
+    )
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
@@ -77,19 +80,22 @@ def run_migrations_online() -> None:
 
     In this scenario we need to create an Engine
     and associate a connection with the context.
-
     """
-    configuration = config.get_section(config.config_ini_section)
-    configuration["sqlalchemy.url"] = get_url()
+    # Get database URL from environment or use default
+    url = get_url()
+    
+    # Create engine directly with the URL
     connectable = engine_from_config(
-        configuration,
+        {"sqlalchemy.url": url},
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True
         )
 
         with context.begin_transaction():

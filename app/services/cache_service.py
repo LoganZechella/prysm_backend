@@ -4,7 +4,7 @@ import json
 from redis import Redis
 from pydantic import BaseModel
 import logging
-from app.models.event import Event
+from app.models.event import EventModel
 from app.models.preferences import UserPreferences
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ class CacheService:
         user_id: str,
         preferences: UserPreferences,
         context: Dict[str, Any] = None
-    ) -> Optional[List[Event]]:
+    ) -> Optional[List[EventModel]]:
         """
         Get cached recommendations with smart refresh strategy.
         
@@ -100,7 +100,7 @@ class CacheService:
         self,
         user_id: str,
         preferences: UserPreferences,
-        recommendations: List[Event],
+        recommendations: List[EventModel],
         context: Dict[str, Any] = None
     ) -> None:
         """

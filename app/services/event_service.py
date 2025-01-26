@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import and_, or_, func, cast, Float
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.expression import literal_column
-from app.models.event import Event
+from app.models.event import EventModel
 from app.models.preferences import UserPreferences
 from app.utils.pagination import PaginationParams
 import logging
@@ -20,7 +20,7 @@ class EventService:
         pagination: PaginationParams,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
-    ) -> Tuple[List[Event], int]:
+    ) -> Tuple[List[EventModel], int]:
         """
         Get events matching user preferences with efficient filtering.
         
@@ -36,32 +36,32 @@ class EventService:
         """
         try:
             # Start with base query
-            query = db.query(Event)
+            query = db.query(EventModel)
             
             # Apply date filters if provided
             if start_date:
-                query = query.filter(Event.start_time >= start_date)
+                query = query.filter(EventModel.start_time >= start_date)
             if end_date:
-                query = query.filter(Event.start_time <= end_date)
+                query = query.filter(EventModel.start_time <= end_date)
             
             # Apply category filters
             if preferences.preferred_categories:
                 query = query.filter(
-                    Event.categories.overlap(preferences.preferred_categories)
+                    EventModel.categories.overlap(preferences.preferred_categories)
                 )
             if preferences.excluded_categories:
                 query = query.filter(
-                    ~Event.categories.overlap(preferences.excluded_categories)
+                    ~EventModel.categories.overlap(preferences.excluded_categories)
                 )
             
             # Apply price filters
             if preferences.max_price < float('inf'):
                 query = query.filter(
-                    cast(Event.price_info['min_price'], Float) <= preferences.max_price
+                    cast(EventModel.price_info['min_price'], Float) <= preferences.max_price
                 )
             if preferences.min_price > 0:
                 query = query.filter(
-                    cast(Event.price_info['max_price'], Float) >= preferences.min_price
+                    cast(EventModel.price_info['max_price'], Float) >= preferences.min_price
                 )
             
             # Apply location filter if provided
@@ -74,8 +74,8 @@ class EventService:
                 distance_filter = func.ST_DWithin(
                     func.ST_SetSRID(
                         func.ST_MakePoint(
-                            cast(Event.location['lng'], Float),
-                            cast(Event.location['lat'], Float)
+                            cast(EventModel.location['lng'], Float),
+                            cast(EventModel.location['lat'], Float)
                         ),
                         4326
                     ),
@@ -96,14 +96,14 @@ class EventService:
             # Add sorting
             if pagination.sort_by == 'start_time':
                 query = query.order_by(
-                    Event.start_time.desc() if pagination.sort_desc else Event.start_time
+                    EventModel.start_time.desc() if pagination.sort_desc else EventModel.start_time
                 )
             elif pagination.sort_by == 'popularity':
                 query = query.order_by(
-                    Event.popularity_score.desc() if pagination.sort_desc else Event.popularity_score
+                    EventModel.popularity_score.desc() if pagination.sort_desc else EventModel.popularity_score
                 )
             elif pagination.sort_by == 'price':
-                price_expr = cast(Event.price_info['min_price'], Float)
+                price_expr = cast(EventModel.price_info['min_price'], Float)
                 query = query.order_by(
                     price_expr.desc() if pagination.sort_desc else price_expr
                 )
@@ -119,7 +119,7 @@ class EventService:
         db: Session,
         timeframe_days: int = 7,
         pagination: PaginationParams = PaginationParams()
-    ) -> Tuple[List[Event], int]:
+    ) -> Tuple[List[EventModel], int]:
         """
         Get trending events with efficient filtering and scoring.
         
@@ -136,16 +136,16 @@ class EventService:
             
             # Calculate trending score using window functions
             trending_score = (
-                (Event.popularity_score * 0.7) +  # Base popularity
-                (1.0 - func.extract('epoch', Event.start_time - now) / 
+                (EventModel.popularity_score * 0.7) +  # Base popularity
+                (1.0 - func.extract('epoch', EventModel.start_time - now) / 
                  (timeframe_days * 24 * 3600)) * 0.3  # Time factor
             ).label('trending_score')
             
             # Build query with trending score
-            query = db.query(Event, trending_score).filter(
+            query = db.query(EventModel, trending_score).filter(
                 and_(
-                    Event.start_time >= now,
-                    Event.start_time <= now + func.make_interval(days=timeframe_days)
+                    EventModel.start_time >= now,
+                    EventModel.start_time <= now + func.make_interval(days=timeframe_days)
                 )
             )
             
@@ -171,7 +171,7 @@ class EventService:
         db: Session,
         event_id: int,
         limit: int = 10
-    ) -> List[Event]:
+    ) -> List[EventModel]:
         """
         Get similar events using efficient similarity calculation.
         
@@ -185,19 +185,19 @@ class EventService:
         """
         try:
             # Get reference event
-            reference = db.query(Event).get(event_id)
+            reference = db.query(EventModel).get(event_id)
             if not reference:
                 return []
             
             # Calculate similarity score using multiple factors
             category_similarity = func.array_overlap(
-                Event.categories,
+                EventModel.categories,
                 reference.categories
             ).label('category_similarity')
             
             price_similarity = (
                 1.0 - func.abs(
-                    cast(Event.price_info['min_price'], Float) -
+                    cast(EventModel.price_info['min_price'], Float) -
                     cast(literal_column(str(reference.price_info['min_price'])), Float)
                 ) / 1000.0  # Normalize price difference
             ).label('price_similarity')
@@ -206,8 +206,8 @@ class EventService:
                 1.0 - func.ST_Distance(
                     func.ST_SetSRID(
                         func.ST_MakePoint(
-                            cast(Event.location['lng'], Float),
-                            cast(Event.location['lat'], Float)
+                            cast(EventModel.location['lng'], Float),
+                            cast(EventModel.location['lat'], Float)
                         ),
                         4326
                     ),
@@ -229,8 +229,8 @@ class EventService:
             ).label('similarity_score')
             
             # Query similar events
-            query = db.query(Event, similarity_score).filter(
-                Event.id != event_id  # Exclude reference event
+            query = db.query(EventModel, similarity_score).filter(
+                EventModel.id != event_id  # Exclude reference event
             ).order_by(similarity_score.desc()).limit(limit)
             
             # Extract events from results

@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from sqlalchemy import func, cast, Float, text
 from app.db.session import SessionLocal
-from app.models.event import Event
+from app.models.event import EventModel
 import json
 
 # Configure logging
@@ -19,7 +19,7 @@ def analyze_events():
     db = SessionLocal()
     try:
         # Get all events
-        all_events = db.query(Event).all()
+        all_events = db.query(EventModel).all()
         
         logger.info("=== Event Database Analysis ===\n")
         

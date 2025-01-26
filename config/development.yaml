@@ -2,7 +2,9 @@ gcp:
   project_id: "prysm-dev"
 
 database:
-  url: "postgresql://postgres:postgres@localhost:5432/prysm_dev"
+  host: localhost
+  port: 5432
+  url: "postgresql://logan@localhost:5432/prysm_dev"
 
 redis:
   host: "localhost"
