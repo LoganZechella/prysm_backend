@@ -24,25 +24,11 @@ logger = logging.getLogger(__name__)
 # List of locations to scrape
 LOCATIONS = [
     {
-        'city': 'san francisco',
-        'state': 'california',
-        'lat': 37.7749,
-        'lng': -122.4194,
+        'city': 'louisville',
+        'state': 'kentucky',
+        'lat': 38.2527,
+        'lng': -85.7585,
         'radius': 25  # miles
-    },
-    {
-        'city': 'oakland',
-        'state': 'california',
-        'lat': 37.8044,
-        'lng': -122.2712,
-        'radius': 15
-    },
-    {
-        'city': 'san jose',
-        'state': 'california',
-        'lat': 37.3382,
-        'lng': -121.8863,
-        'radius': 20
     }
 ]
 
@@ -65,11 +51,6 @@ async def collect_events():
         
         # Initialize event collection service
         service = EventCollectionService(scrapfly_api_key=scrapfly_api_key)
-        
-        # Reset circuit breakers
-        await service.eventbrite.reset()
-        await service.facebook.reset()
-        await service.meetup.reset()
         
         # Create database session
         db = SessionLocal()
@@ -96,7 +77,7 @@ async def collect_events():
                     logger.info(f"Collecting events from {source_name}...")
                     source_events = await scraper.scrape_events(LOCATIONS[0], date_range)
                     if source_events:
-                        events.extend([{**event, 'source': source_name} for event in source_events])
+                        events.extend([{**event, 'platform': source_name} for event in source_events])
                         logger.info(f"Collected {len(source_events)} events from {source_name}")
                     else:
                         logger.warning(f"No events found from {source_name}")
@@ -110,60 +91,80 @@ async def collect_events():
             new_events_count = 0
             for event_data in events:
                 try:
+                    # Get event ID and platform
+                    event_id = event_data.get('id') if isinstance(event_data, dict) else event_data.platform_id
+                    platform = event_data.get('platform') if isinstance(event_data, dict) else event_data.platform
+                    
+                    if not event_id:
+                        logger.error("Event ID is missing")
+                        continue
+                        
                     # Check if event already exists
                     existing = db.query(EventModel).filter_by(
-                        source=event_data['source'],
-                        source_id=event_data['event_id']
+                        platform=platform,
+                        platform_id=event_id
                     ).first()
                     
                     if existing:
-                        logger.info(f"Event {event_data['event_id']} from {event_data['source']} already exists")
+                        logger.info(f"Event {event_id} from {platform} already exists")
                         continue
-                    
-                    # Create new event
-                    event = EventModel(
-                        title=event_data['title'],
-                        description=event_data.get('description', ''),
-                        start_time=to_utc_datetime(event_data['start_time']),
-                        end_time=to_utc_datetime(event_data['end_time']) if event_data.get('end_time') else None,
-                        location=event_data['location'],
-                        categories=event_data.get('categories', []),
-                        price_info=event_data.get('price_info', {}),
-                        source=event_data['source'],
-                        source_id=event_data['event_id'],
-                        url=event_data['url'],
-                        image_url=event_data.get('image_url'),
-                        venue=event_data.get('venue', {}),
-                        organizer=event_data.get('organizer', {}),
-                        tags=event_data.get('tags', [])
-                    )
-                    
+
+                    # Create new event if not already an EventModel
+                    if not isinstance(event_data, EventModel):
+                        venue_data = event_data.get('venue', {})
+                        organizer_data = event_data.get('organizer', {})
+                        
+                        event = EventModel(
+                            platform_id=event_id,
+                            platform=platform,
+                            title=event_data['title'],
+                            description=event_data.get('description', ''),
+                            start_datetime=to_utc_datetime(event_data['start_time']),
+                            end_datetime=to_utc_datetime(event_data['end_time']) if event_data.get('end_time') else None,
+                            url=event_data['url'],
+                            venue_name=venue_data.get('name', ''),
+                            venue_lat=float(venue_data.get('lat', 0)),
+                            venue_lon=float(venue_data.get('lon', 0)),
+                            venue_city=venue_data.get('city', ''),
+                            venue_state=venue_data.get('state', ''),
+                            organizer_name=organizer_data.get('name', ''),
+                            is_online=event_data.get('is_online', False),
+                            rsvp_count=int(event_data.get('rsvp_count', 0)),
+                            price_info=event_data.get('price_info', ''),
+                            categories=event_data.get('categories', []),
+                            image_url=event_data.get('image_url', '')
+                        )
+                    else:
+                        event = event_data
+
                     db.add(event)
                     new_events_count += 1
-                    logger.info(f"Added new event: {event.title} from {event.source}")
+                    logger.info(f"Added new event: {event.title} from {event.platform}")
                     
                 except Exception as e:
-                    logger.error(f"Error storing event {event_data.get('event_id')}: {str(e)}")
+                    logger.error(f"Error storing event {event_id}: {str(e)}")
                     continue
             
             # Commit all changes
             db.commit()
             logger.info(f"Successfully stored {new_events_count} new events")
             
-            # Get statistics
+            # Log statistics
             total_events = db.query(EventModel).count()
-            events_by_source = db.query(EventModel.source, func.count(EventModel.id)).group_by(EventModel.source).all()
+            events_by_source = db.query(
+                EventModel.platform,
+                func.count(EventModel.id).label('count')
+            ).group_by(EventModel.platform).all()
             
             logger.info(f"Total events in database: {total_events}")
-            logger.info("Events by source:")
-            for source, count in events_by_source:
-                logger.info(f"  {source}: {count}")
-                
+            for platform, count in events_by_source:
+                logger.info(f"Events from {platform}: {count}")
+            
         finally:
             db.close()
             
     except Exception as e:
-        logger.error(f"Error collecting events: {str(e)}")
+        logger.error(f"Error in collect_events: {str(e)}")
         raise
 
 if __name__ == "__main__":
