@@ -5,6 +5,8 @@ import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 import logging
 from dotenv import load_dotenv
+import sagemaker
+from app.config.aws_config import AWS_CONFIG, validate_aws_config
 
 # Add project root to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,53 +16,95 @@ from app.config.aws import AWSConfig
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def verify_aws_credentials():
-    """Verify AWS credentials are properly configured"""
+def verify_iam_role():
+    """Verify IAM role exists and has correct permissions."""
+    iam = boto3.client('iam')
     try:
-        # Initialize boto3 client (it will use AWS CLI credentials automatically)
-        region = 'us-west-2'
-        s3 = boto3.client('s3', region_name=region)
+        role_name = AWS_CONFIG['sagemaker_role_arn'].split('/')[-1]
+        response = iam.get_role(RoleName=role_name)
+        print(f"✅ IAM Role '{role_name}' exists")
         
-        # Test S3 access
-        bucket_name = 'prysm-events-test'
-        logger.info(f"Testing access to S3 bucket: {bucket_name}")
+        # Check attached policies
+        policies = iam.list_attached_role_policies(RoleName=role_name)
+        required_policies = [
+            'AmazonSageMakerFullAccess',
+            'AmazonS3FullAccess',
+            'AmazonFeatureStoreAccess'
+        ]
         
-        try:
-            # First, list all buckets to verify basic S3 access
-            response = s3.list_buckets()
-            existing_buckets = [bucket['Name'] for bucket in response['Buckets']]
-            logger.info(f"Found existing buckets: {existing_buckets}")
+        attached_policies = [p['PolicyName'] for p in policies['AttachedPolicies']]
+        missing_policies = set(required_policies) - set(attached_policies)
+        
+        if missing_policies:
+            print(f"❌ Missing required policies: {missing_policies}")
+        else:
+            print("✅ All required policies are attached")
             
-            if bucket_name in existing_buckets:
-                logger.info(f"Successfully verified access to existing S3 bucket: {bucket_name}")
+    except ClientError as e:
+        print(f"❌ Error verifying IAM role: {str(e)}")
+
+def verify_s3_bucket():
+    """Verify S3 bucket exists and is accessible."""
+    s3 = boto3.client('s3')
+    try:
+        s3.head_bucket(Bucket=AWS_CONFIG['s3_bucket'])
+        print(f"✅ S3 bucket '{AWS_CONFIG['s3_bucket']}' exists and is accessible")
+    except ClientError as e:
+        print(f"❌ Error verifying S3 bucket: {str(e)}")
+
+def verify_feature_store():
+    """Verify Feature Store setup."""
+    feature_store = boto3.client('sagemaker-featurestore-runtime')
+    try:
+        # Try to describe feature groups
+        sagemaker_client = boto3.client('sagemaker')
+        response = sagemaker_client.list_feature_groups()
+        
+        required_groups = ['user-features', 'event-features']
+        existing_groups = [g['FeatureGroupName'] for g in response['FeatureGroupSummaries']]
+        
+        for group in required_groups:
+            if group in existing_groups:
+                print(f"✅ Feature group '{group}' exists")
             else:
-                logger.info(f"Bucket {bucket_name} does not exist yet. Attempting to create...")
-                try:
-                    s3.create_bucket(
-                        Bucket=bucket_name,
-                        CreateBucketConfiguration={'LocationConstraint': region}
-                    )
-                    logger.info(f"Successfully created S3 bucket: {bucket_name}")
-                except ClientError as create_error:
-                    logger.error(f"Failed to create S3 bucket: {str(create_error)}")
-                    return False
-                    
-            # Test DynamoDB access
-            dynamodb = boto3.client('dynamodb', region_name=region)
-            tables = dynamodb.list_tables()
-            logger.info(f"Successfully accessed DynamoDB. Found {len(tables.get('TableNames', []))} tables.")
-            
-            logger.info("AWS credentials verification completed successfully!")
-            return True
-            
-        except ClientError as e:
-            logger.error(f"Error accessing AWS services: {str(e)}")
-            return False
-            
+                print(f"❌ Feature group '{group}' not found")
+                
+    except ClientError as e:
+        print(f"❌ Error verifying Feature Store: {str(e)}")
+
+def verify_sagemaker_access():
+    """Verify SageMaker access."""
+    try:
+        sagemaker_session = sagemaker.Session()
+        print(f"✅ Successfully created SageMaker session")
+        
+        # Try to list training jobs
+        client = boto3.client('sagemaker')
+        response = client.list_training_jobs(MaxResults=1)
+        print("✅ Successfully connected to SageMaker API")
+        
     except Exception as e:
-        logger.error(f"Error during AWS verification: {str(e)}")
-        return False
+        print(f"❌ Error verifying SageMaker access: {str(e)}")
+
+def main():
+    """Run all verifications."""
+    print("\n🔍 Verifying AWS Setup...\n")
+    
+    try:
+        # Validate config
+        validate_aws_config()
+        print("✅ AWS configuration is valid")
+    except ValueError as e:
+        print(f"❌ AWS configuration error: {str(e)}")
+        return
+    
+    # Run verifications
+    verify_iam_role()
+    verify_s3_bucket()
+    verify_feature_store()
+    verify_sagemaker_access()
+    
+    print("\n✨ AWS setup verification complete!")
 
 if __name__ == "__main__":
-    success = verify_aws_credentials()
-    sys.exit(0 if success else 1) 
+    main() 
