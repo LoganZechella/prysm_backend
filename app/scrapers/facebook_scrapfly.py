@@ -2,15 +2,27 @@
 Facebook scraper implementation using Scrapfly.
 """
 
-from typing import Dict, Any, List, Optional
-from datetime import datetime
+from typing import Dict, Any, List, Optional, Tuple
+from datetime import datetime, timedelta
 import logging
 import json
-import re
+import os
+import random
+import base64
+from urllib.parse import urlencode
 from bs4 import BeautifulSoup
+import re
+from scrapfly import ScrapflyClient, ScrapeConfig
+from scrapfly.errors import ScrapflyError
+import asyncio
+import requests
+from dateutil import parser
+import hashlib
 
-from app.scrapers.base import ScrapflyBaseScraper, ScrapflyError
+from app.scrapers.base import ScrapflyBaseScraper
 from app.utils.retry_handler import RetryError
+from app.models.event import EventModel
+from app.services.location_recommendations import LocationService
 
 logger = logging.getLogger(__name__)
 
@@ -20,57 +32,84 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
     def __init__(self, api_key: str, **kwargs):
         """Initialize the Facebook scraper"""
         super().__init__(api_key=api_key, platform='facebook', **kwargs)
-        
+        self.logger = logging.getLogger(__name__)
+        self.client = ScrapflyClient(key=api_key)
+        self.location_service = LocationService()
+    
+    async def _make_request(self, url: str) -> Optional[BeautifulSoup]:
+        """Make a request to Facebook using Scrapfly and return BeautifulSoup object"""
+        try:
+            self.logger.debug(f"[facebook] Making request to: {url}")
+            config = await self._get_request_config(url)
+            self.logger.debug(f"[facebook] Request config: {config}")
+            
+            result = await self.client.async_scrape(ScrapeConfig(**config))
+            self.logger.debug(f"[facebook] Response status: {result.status_code}")
+            
+            if not result.success:
+                self.logger.error(f"[facebook] Request failed: {result.error}")
+                raise RetryError(f"Facebook request failed: {result.error}")
+            
+            # Parse HTML response
+            try:
+                soup = BeautifulSoup(result.content, 'html.parser')
+                self.logger.debug(f"[facebook] Successfully parsed HTML response")
+                return soup
+            except Exception as e:
+                self.logger.error(f"[facebook] Failed to parse HTML response: {str(e)}")
+                raise RetryError(f"Failed to parse HTML response: {str(e)}")
+            
+        except ScrapflyError as e:
+            self.logger.error(f"[facebook] Scrapfly error: {str(e)}")
+            raise RetryError(f"Scrapfly error: {str(e)}")
+        except Exception as e:
+            self.logger.error(f"[facebook] Request error: {str(e)}")
+            raise RetryError(f"Request error: {str(e)}")
+    
     async def _get_request_config(self, url: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Get Facebook-specific Scrapfly configuration"""
-        logger.debug(f"[facebook] Building request config for URL: {url}")
+        self.logger.debug(f"[facebook] Building request config for URL: {url}")
         
         base_config = await super()._get_request_config(url, config)
-        logger.debug(f"[facebook] Base config from parent: {json.dumps(base_config, indent=2)}")
         
         # Add Facebook-specific settings
         facebook_config = {
-            'render_js': True,  # Enable JavaScript rendering
-            'asp': True,  # Enable anti-scraping protection
-            'country': 'us',  # Set country for geo-targeting
-            'premium_proxy': True,  # Use premium proxies for better success rate
-            'cookies': True,  # Enable cookie handling
-            'session': True,  # Enable session handling
-            'wait_for_selector': '[data-testid="event-card"], .event-card',  # Wait for content to load
-            'js_scenario': {
-                'steps': [
-                    {'wait': 3000},  # Initial wait for page load
-                    {'scroll_y': 500},  # First scroll
-                    {'wait': 1000},
-                    {'scroll_y': 1000},  # Second scroll
-                    {'wait': 1000},
-                    {'scroll_y': 1500},  # Final scroll
-                    {'wait': 2000}  # Final wait
-                ]
-            },
+            'url': url,
+            'render_js': True,
+            'asp': True,
+            'country': 'us',
+            'tags': ['facebook', 'events'],
+            'method': 'GET',
             'headers': {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
                 'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
-                'Cache-Control': 'max-age=0',
-                'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-                'Sec-Ch-Ua-Mobile': '?0',
-                'Sec-Ch-Ua-Platform': '"macOS"',
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'none',
                 'Sec-Fetch-User': '?1',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
         }
         
-        logger.debug(f"[facebook] Adding Facebook-specific config: {json.dumps(facebook_config, indent=2)}")
-        final_config = {**base_config, **facebook_config}
-        logger.debug(f"[facebook] Final merged config: {json.dumps(final_config, indent=2)}")
+        # Add retry configuration
+        facebook_config.update({
+            'retry': {
+                'enabled': True,
+                'max_retries': 3,
+                'retry_delay': 1000,
+                'exceptions': [
+                    'ScrapflyAspError',
+                    'ScrapflyProxyError',
+                    'UpstreamHttpClientError'
+                ]
+            }
+        })
         
-        return final_config
+        return {**base_config, **facebook_config}
     
     async def scrape_events(
         self,
@@ -92,86 +131,319 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
         events = []
         page = 1
         max_pages = 10  # Limit to prevent infinite loops
+        seen_event_ids = set()  # Track seen events to prevent duplicates
+        next_url = None
         
         try:
             while page <= max_pages:
-                url = self._build_search_url(location, date_range, categories, page)
-                logger.info(f"Scraping Facebook page {page}: {url}")
+                self.logger.info(f"[facebook] Scraping page {page}")
+                
+                # Build URL for first page or use next_url for subsequent pages
+                url = next_url if next_url else await self._build_search_url(
+                    location, 
+                    date_range['start'], 
+                    date_range['end']
+                )
+                
+                if not url:
+                    self.logger.error("[facebook] Failed to build search URL")
+                    break
                 
                 try:
-                    soup = await self._make_request(url)
+                    # Make request with retries
+                    soup = None
+                    for attempt in range(3):  # 3 retries
+                        soup = await self._make_request(url)
+                        if soup:
+                            break
+                        self.logger.warning(f"[facebook] Request attempt {attempt + 1} failed, retrying...")
+                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    
                     if not soup:
+                        self.logger.error("[facebook] All request attempts failed")
                         break
                     
-                    # First try to get events from JSON data
-                    new_events = self._parse_json_events(soup)
+                    # Parse events from HTML
+                    new_events = self._parse_html(soup)
+                    self.logger.debug(f"[facebook] Found {len(new_events)} events from HTML")
                     
-                    # Fallback to HTML parsing if JSON parsing fails
-                    if not new_events:
-                        new_events = self._parse_event_cards(soup)
+                    # Process new events
+                    for event in new_events:
+                        event_id = event.get('platform_id')
+                        if not event_id:
+                            continue
+                            
+                        # Skip duplicates
+                        if event_id in seen_event_ids:
+                            continue
+                            
+                        seen_event_ids.add(event_id)
+                        events.append(event)
                     
-                    if not new_events:
-                        logger.info(f"No more events found on page {page}")
+                    self.logger.info(f"[facebook] Total unique events found: {len(events)}")
+                    
+                    # Get next page URL if available
+                    next_link = soup.find("a", {"aria-label": "Next"})
+                    next_url = next_link.get("href") if next_link else None
+                    if not next_url:
+                        self.logger.info("[facebook] No more pages to scrape")
                         break
                     
-                    events.extend(new_events)
-                    
-                    # Check if there's a next page
-                    if not self._has_next_page(soup):
-                        break
-                    
+                    # Rate limiting
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
                     page += 1
                     
-                except ScrapflyError as e:
-                    logger.error(f"Scrapfly error on page {page}: {str(e)}")
-                    break
-                except RetryError as e:
-                    logger.error(f"Max retries exceeded on page {page}: {str(e)}")
-                    break
                 except Exception as e:
-                    logger.error(f"Unexpected error on page {page}: {str(e)}")
+                    self.logger.error(f"[facebook] Error on page {page}: {str(e)}")
+                    if "rate limit" in str(e).lower():
+                        self.logger.warning("[facebook] Rate limit hit, waiting longer...")
+                        await asyncio.sleep(60)  # Wait longer on rate limit
+                        continue
                     break
             
+            self.logger.info(f"[facebook] Scraping completed. Found {len(events)} unique events")
             return events
             
         except Exception as e:
-            logger.error(f"Failed to scrape Facebook events: {str(e)}")
-            raise
+            self.logger.error(f"[facebook] Failed to scrape events: {str(e)}")
+            raise RetryError(f"Facebook scraping failed: {str(e)}")
     
-    def _build_search_url(
+    async def _get_page_id(self, location: dict) -> str:
+        """Get the Facebook page ID for a location."""
+        # Return default Louisville page ID
+        return "104006346303593"
+    
+    async def _build_search_url(
         self,
-        location: Dict[str, Any],
+        location: dict,
         date_range: Dict[str, datetime],
-        categories: Optional[List[str]],
-        page: int
+        categories: Optional[List[str]] = None,
+        page: int = 1
     ) -> str:
-        """Build the Facebook search URL with parameters"""
-        base_url = "https://www.facebook.com/events/search/events"
+        """Build the Facebook events search URL."""
+        base_url = "https://www.facebook.com/events/search"
         
         # Format location
-        location_str = f"{location['city'].lower()}-{location['state'].lower()}"
-        
-        # Format dates
-        start_date = int(date_range['start'].timestamp())
-        end_date = int(date_range['end'].timestamp())
+        location_query = f"{location.get('city', '')} {location.get('state', '')}"
         
         # Build query parameters
-        params = [
-            f"place={location_str}",
-            f"start_date={start_date}",
-            f"end_date={end_date}",
-            f"page={page}",
-            "distance_unit=mile",
-            "distance=50"  # Search within 50 miles
-        ]
+        params = {
+            "q": location_query.strip(),
+            "source": "discovery",
+            "display": "list",
+            "filter": "upcoming",
+            "sort": "time",
+        }
         
-        if categories:
-            # Map categories to Facebook's category IDs
-            category_ids = self._map_categories(categories)
-            if category_ids:
-                params.append(f"category_ids={','.join(category_ids)}")
+        # Add distance if provided
+        if location.get('radius'):
+            params['distance'] = str(location['radius'])
+            params['unit'] = 'mi'
         
-        return f"{base_url}?{'&'.join(params)}"
+        # Build the URL with parameters
+        url = f"{base_url}?{urlencode(params)}"
+        self.logger.debug(f"[facebook] Built API URL: {url}")
+        return url
+    
+    def _parse_date(self, date_str: str) -> datetime:
+        """Parse date string from Facebook HTML."""
+        try:
+            # Remove any extra text after the time
+            if " and " in date_str:
+                date_str = date_str.split(" and ")[0]
+            
+            # Handle relative dates
+            if date_str.lower().startswith("today"):
+                return datetime.now()
+            elif date_str.lower().startswith("tomorrow"):
+                return datetime.now() + timedelta(days=1)
+            
+            # Parse standard date format: "Day, DD Mon at HH:MM"
+            # Example: "Thurs, 6 Mar at 19:00"
+            match = re.match(r"(?:\w+), (\d+) (\w+) at (\d+):(\d+)", date_str)
+            if match:
+                day, month, hour, minute = match.groups()
+                # Convert month name to number
+                month_num = {
+                    'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+                    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
+                }[month]
+                
+                # Get the current year
+                year = datetime.now().year
+                
+                # Create the datetime object
+                dt = datetime(year, month_num, int(day), int(hour), int(minute))
+                
+                # If the date is in the past, add a year
+                if dt < datetime.now():
+                    dt = dt.replace(year=year + 1)
+                
+                return dt
+            
+            self.logger.warning(f"[facebook] Error parsing date '{date_str}': Unknown format")
+            return datetime.now()
+            
+        except Exception as e:
+            self.logger.warning(f"[facebook] Error parsing date '{date_str}': {str(e)}")
+            return datetime.now()
+    
+    def _parse_html(self, soup: BeautifulSoup) -> List[dict]:
+        """Parse events from Facebook HTML."""
+        events = []
+        event_cards = soup.find_all("div", {"role": "article"})
+        self.logger.debug(f"[facebook] Found {len(event_cards)} event cards")
+
+        for i, card in enumerate(event_cards, 1):
+            try:
+                self.logger.debug(f"[facebook] Processing card {i}")
+                self.logger.debug(f"[facebook] Card HTML: {card.prettify()}")
+                
+                # Extract title from the span with class x4k7w5x
+                title_elem = card.find("span", {"class": "x4k7w5x"})
+                if not title_elem:
+                    self.logger.debug(f"[facebook] No title element found in card {i}")
+                    continue
+                title = title_elem.get_text().strip()
+                self.logger.debug(f"[facebook] Found title: {title}")
+                
+                # Extract date - look for span with class x193iq5w containing date pattern
+                date_spans = card.find_all("span", {"class": "x193iq5w"})
+                date_str = None
+                for span in date_spans:
+                    text = span.get_text().strip()
+                    if any(day in text.lower() for day in ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']):
+                        date_str = text
+                        self.logger.debug(f"[facebook] Found date string: {date_str}")
+                        break
+                if not date_str:
+                    self.logger.debug(f"[facebook] No date string found in card {i}")
+                    continue
+                
+                # Parse the date string
+                try:
+                    # Example format: "Thu, Mar 6 at 7:00 PM EST"
+                    date_parts = date_str.split(' at ')
+                    date_part = date_parts[0].strip()  # "Thu, Mar 6"
+                    time_part = date_parts[1].strip()  # "7:00 PM EST"
+                    
+                    # Add year since Facebook doesn't include it
+                    current_year = datetime.now().year
+                    date_with_year = f"{date_part}, {current_year}"
+                    dt_str = f"{date_with_year} {time_part}"
+                    start_datetime = parser.parse(dt_str)
+                    self.logger.debug(f"[facebook] Parsed date: {start_datetime}")
+                except Exception as e:
+                    self.logger.error(f"[facebook] Error parsing date: {str(e)}")
+                    continue
+                
+                # Extract venue name
+                venue_name = None
+                venue_spans = card.find_all("span", {"class": "x193iq5w"})
+                for span in venue_spans:
+                    # Look for spans that contain location-like text
+                    text = span.get_text().strip()
+                    # Skip if it's a date string
+                    if any(day in text.lower() for day in ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']):
+                        continue
+                    # Skip if it's an RSVP count
+                    if any(word in text.lower() for word in ['going', 'interested']):
+                        continue
+                    # If we find a span with class x6prxxf, this is likely the venue
+                    if span.find("span", {"class": "x6prxxf"}):
+                        venue_name = text
+                        self.logger.debug(f"[facebook] Found venue: {venue_name}")
+                        break
+                    # Backup: look for text that might be an address
+                    elif any(word in text for word in ['Street', 'Avenue', 'Road', 'Blvd', 'Center', 'Theatre', 'Arena']):
+                        venue_name = text
+                        self.logger.debug(f"[facebook] Found venue (backup method): {venue_name}")
+                        break
+
+                if not venue_name:
+                    self.logger.debug(f"[facebook] No venue found in card {i}")
+                    continue
+                
+                # Extract image URL
+                img = card.find("img", {"class": "x1rg5ohu"})
+                image_url = None
+                if img and img.get("src"):
+                    image_url = img["src"]
+                    self.logger.debug(f"[facebook] Found image URL: {image_url}")
+                
+                # Extract RSVP count
+                rsvp_count = 0
+                interested_count = 0
+                for span in card.find_all("span", {"class": "x1lliihq"}):
+                    text = span.get_text().strip()
+                    if "going" in text.lower():
+                        try:
+                            rsvp_count = int(text.split('·')[1].strip().split()[0])
+                        except (AttributeError, ValueError, IndexError):
+                            pass
+                
+                # Generate a unique platform ID based on title and date
+                platform_id = hashlib.md5(f"{title}{start_datetime}".encode()).hexdigest()
+                
+                # Construct event URL
+                event_url = f"https://www.facebook.com/events/{platform_id}"
+                
+                # Geocode the venue address
+                venue_lat = None
+                venue_lon = None
+                if venue_name:
+                    # Construct full address with city and state
+                    full_address = f"{venue_name}, Louisville, KY, US"
+                    try:
+                        location = self.location_service.geocoder.geocode(full_address)
+                        if location:
+                            venue_lat = location.latitude
+                            venue_lon = location.longitude
+                            self.logger.debug(f"[facebook] Geocoded venue coordinates: {venue_lat}, {venue_lon}")
+                    except Exception as e:
+                        self.logger.error(f"[facebook] Error geocoding venue: {str(e)}")
+                
+                # Create event data
+                event_data = {
+                    "platform_id": platform_id,
+                    "title": title,
+                    "description": "",
+                    "start_datetime": start_datetime,
+                    "end_datetime": start_datetime + timedelta(hours=2),  # Default duration
+                    "url": event_url,
+                    "venue_name": venue_name,
+                    "venue_lat": venue_lat,
+                    "venue_lon": venue_lon,
+                    "venue_city": "Louisville",
+                    "venue_state": "KY",
+                    "venue_country": "US",
+                    "organizer_id": platform_id,
+                    "organizer_name": title.split(" - ")[0] if " - " in title else title,  # Use first part of title or full title as organizer name
+                    "platform": "facebook",
+                    "is_online": False,
+                    "rsvp_count": rsvp_count,
+                    "price_info": "null",
+                    "categories": [],
+                    "image_url": image_url
+                }
+                
+                events.append(event_data)
+                self.logger.debug(f"[facebook] Successfully parsed event: {title}")
+                
+            except Exception as e:
+                self.logger.error(f"[facebook] Error parsing event card {i}: {str(e)}")
+                continue
+
+        self.logger.debug(f"[facebook] Found {len(events)} events from HTML")
+        return events
+    
+    def _has_next_page(self, response_data: Dict[str, Any]) -> bool:
+        """Check if there's a next page of results in the Graph API response"""
+        try:
+            paging = response_data.get('paging', {})
+            return bool(paging.get('next'))
+        except Exception:
+            return False
     
     def _map_categories(self, categories: List[str]) -> List[str]:
         """Map generic categories to Facebook category IDs"""
@@ -193,224 +465,22 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
                 for cat in categories
                 if cat.lower() in category_mapping]
     
-    def _parse_json_events(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
-        """Parse events from embedded JSON data"""
-        events = []
-        logger.debug("[facebook] Starting JSON event parsing")
+    def _get_scraper_config(self) -> dict:
+        if not os.getenv("FACEBOOK_ACCESS_TOKEN"):
+            raise ValueError("FACEBOOK_ACCESS_TOKEN environment variable is required")
         
-        try:
-            # Look for JSON data in script tags
-            scripts = soup.find_all("script", {"type": "application/json"})
-            logger.debug(f"[facebook] Found {len(scripts)} JSON script tags")
-            
-            for script in scripts:
-                try:
-                    data = json.loads(script.string)
-                    logger.debug(f"[facebook] Parsed JSON data: {json.dumps(data, indent=2)}")
-                    
-                    if not isinstance(data, dict):
-                        logger.debug("[facebook] Skipping non-dict JSON data")
-                        continue
-                    
-                    # Look for event data in various JSON structures
-                    event_data = data.get("eventData") or data.get("events") or data.get("data", {}).get("events")
-                    if not event_data:
-                        logger.debug("[facebook] No event data found in JSON")
-                        continue
-                    
-                    logger.debug(f"[facebook] Found event data: {json.dumps(event_data, indent=2)}")
-                    
-                    if isinstance(event_data, list):
-                        for event in event_data:
-                            parsed_event = self._parse_json_event(event)
-                            if parsed_event:
-                                events.append(parsed_event)
-                    elif isinstance(event_data, dict):
-                        parsed_event = self._parse_json_event(event_data)
-                        if parsed_event:
-                            events.append(parsed_event)
-                            
-                except json.JSONDecodeError:
-                    logger.warning("[facebook] Failed to parse JSON script tag")
-                    continue
-                except Exception as e:
-                    logger.warning(f"[facebook] Error parsing JSON event data: {str(e)}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"[facebook] Error parsing JSON data: {str(e)}")
-            
-        logger.debug(f"[facebook] Found {len(events)} events in JSON")
-        return events
-    
-    def _parse_json_event(self, event_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Parse a single event from JSON data"""
-        try:
-            # Extract required fields
-            event_id = event_data.get("id")
-            title = event_data.get("name")
-            start_time = event_data.get("startTime") or event_data.get("start_time")
-            
-            if not all([event_id, title, start_time]):
-                return None
-            
-            # Parse dates
-            try:
-                start_time = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-                end_time = None
-                if event_data.get("endTime") or event_data.get("end_time"):
-                    end_time = datetime.fromisoformat(
-                        (event_data.get("endTime") or event_data.get("end_time")).replace("Z", "+00:00")
-                    )
-            except (ValueError, AttributeError):
-                return None
-            
-            # Extract location data
-            place = event_data.get("place", {})
-            location = {
-                "venue_name": place.get("name", ""),
-                "address": place.get("address", {}).get("formatted", ""),
-                "city": place.get("address", {}).get("city", ""),
-                "state": place.get("address", {}).get("state", ""),
-                "latitude": float(place.get("location", {}).get("latitude", 0)),
-                "longitude": float(place.get("location", {}).get("longitude", 0))
+        return {
+            "asp": True,
+            "country": "us",
+            "render_js": False,
+            "retry_attempts": 3,
+            "retry_wait_seconds": 10,
+            "headers": {
+                "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Pragma": "no-cache",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
-            
-            return {
-                "title": title,
-                "description": event_data.get("description", ""),
-                "start_time": start_time,
-                "end_time": end_time,
-                "location": location,
-                "image_url": event_data.get("coverUrl") or event_data.get("cover", {}).get("source", ""),
-                "source": self.platform,
-                "event_id": str(event_id),
-                "url": f"https://www.facebook.com/events/{event_id}",
-                "attendance_count": event_data.get("attendingCount", 0),
-                "interested_count": event_data.get("interestedCount", 0),
-                "organizer": event_data.get("owner", {}).get("name", ""),
-                "is_online": event_data.get("isOnline", False),
-                "ticket_url": event_data.get("ticketUrl", ""),
-                "status": event_data.get("eventStatus", "scheduled")
-            }
-            
-        except Exception as e:
-            logger.warning(f"Error parsing JSON event: {str(e)}")
-            return None
-    
-    def _parse_event_cards(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
-        """Parse event cards from search results page"""
-        events = []
-        logger.debug("[facebook] Starting event card parsing")
-        
-        try:
-            # Find event cards using various possible class patterns
-            event_cards = soup.find_all("div", {
-                "class": re.compile(r"event-card|event_card|eventCard")
-            })
-            logger.debug(f"[facebook] Found {len(event_cards)} event cards")
-            
-            for card in event_cards:
-                try:
-                    event = self._parse_event_card(card)
-                    if event:
-                        logger.debug(f"[facebook] Parsed event: {json.dumps(event, indent=2, default=str)}")
-                        events.append(event)
-                except Exception as e:
-                    logger.warning(f"[facebook] Error parsing event card: {str(e)}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"[facebook] Error parsing event cards: {str(e)}")
-            
-        logger.debug(f"[facebook] Found {len(events)} events in HTML")
-        return events
-    
-    def _parse_event_card(self, card: BeautifulSoup) -> Optional[Dict[str, Any]]:
-        """Parse a single event card"""
-        try:
-            # Extract basic event info using flexible selectors
-            title_elem = card.find(
-                ["h2", "h3", "div"],
-                {"class": re.compile(r".*title.*|.*name.*", re.I)}
-            )
-            if not title_elem:
-                logger.debug("[facebook] No title element found in card")
-                return None
-            
-            # Extract date and time
-            date_elem = card.find(
-                ["time", "div", "span"],
-                {"class": re.compile(r".*time.*|.*date.*", re.I)}
-            )
-            if not date_elem:
-                logger.debug("[facebook] No date element found in card")
-                return None
-            
-            # Try to find the event URL and ID
-            link = card.find("a", href=re.compile(r"/events/\d+"))
-            if not link:
-                logger.debug("[facebook] No event link found in card")
-                return None
-            
-            event_id = re.search(r"/events/(\d+)", link["href"]).group(1)
-            logger.debug(f"[facebook] Found event ID: {event_id}")
-            
-            # Extract location info
-            location_elem = card.find(
-                ["div", "span"],
-                {"class": re.compile(r".*location.*|.*venue.*", re.I)}
-            )
-            
-            return {
-                "title": title_elem.get_text(strip=True),
-                "start_time": self._parse_date(date_elem.get_text(strip=True)),
-                "location": {
-                    "venue_name": location_elem.get_text(strip=True) if location_elem else "",
-                    "address": "",
-                    "latitude": 0,
-                    "longitude": 0
-                },
-                "source": self.platform,
-                "event_id": event_id,
-                "url": f"https://www.facebook.com/events/{event_id}"
-            }
-            
-        except Exception as e:
-            logger.warning(f"[facebook] Error parsing event card: {str(e)}")
-            return None
-    
-    def _parse_date(self, date_str: str) -> datetime:
-        """Parse date string from event card"""
-        try:
-            # Add proper date parsing logic based on Facebook's format
-            return datetime.now()  # Placeholder
-        except Exception:
-            return datetime.now()
-    
-    def _has_next_page(self, soup: BeautifulSoup) -> bool:
-        """Check if there's a next page of results"""
-        try:
-            # Look for next page button or link
-            next_elem = soup.find(
-                ["a", "button", "div"],
-                {
-                    "class": re.compile(r".*next.*", re.I),
-                    "aria-label": re.compile(r".*next.*", re.I)
-                }
-            )
-            
-            if not next_elem:
-                return False
-            
-            # Check if the next button is disabled
-            disabled = (
-                "disabled" in next_elem.get("class", []) or
-                next_elem.get("aria-disabled") == "true" or
-                next_elem.get("disabled") is not None
-            )
-            
-            return not disabled
-            
-        except Exception:
-            return False 
+        } 

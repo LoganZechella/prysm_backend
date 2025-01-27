@@ -13,6 +13,7 @@ from app.scrapers.facebook_scrapfly import FacebookScrapflyScraper
 from app.scrapers.meetup_scrapfly import MeetupScrapflyScraper
 from app.services.event_pipeline import EventPipeline
 from app.utils.retry_handler import RetryError
+from app.models.event import EventModel
 
 logger = logging.getLogger(__name__)
 
@@ -161,3 +162,46 @@ class EventCollectionService:
     def stop_collection_task(self) -> None:
         """Stop the collection task"""
         self.running = False 
+
+    async def store_event(self, event: Dict[str, Any], source: str) -> Optional[EventModel]:
+        """Store an event in the database"""
+        event_id = event.get("id")
+        if not event_id:
+            logger.error("Event ID is missing")
+            return None
+
+        # Check if event already exists
+        existing_event = await self.db.query(EventModel).filter(
+            EventModel.source_id == event_id,
+            EventModel.source == source
+        ).first()
+
+        if existing_event:
+            logger.debug(f"Event {event_id} already exists in database")
+            return None
+
+        # Create new event
+        event_model = EventModel(
+            source_id=event_id,
+            source=source,
+            title=event.get("title"),
+            description=event.get("description"),
+            start_time=event.get("start_time"),
+            end_time=event.get("end_time"),
+            url=event.get("url"),
+            venue_name=event.get("venue_name"),
+            venue_address=event.get("venue_address"),
+            venue_city=event.get("venue_city"),
+            venue_state=event.get("venue_state"),
+            venue_zip=event.get("venue_zip"),
+            venue_country=event.get("venue_country"),
+            venue_lat=event.get("venue_lat"),
+            venue_lon=event.get("venue_lon"),
+            is_online=event.get("is_online", False),
+            image_url=event.get("image_url")
+        )
+
+        self.db.add(event_model)
+        await self.db.commit()
+        await self.db.refresh(event_model)
+        return event_model 
