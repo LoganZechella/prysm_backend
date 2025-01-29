@@ -101,7 +101,7 @@ def create_access_token(user_id: str) -> str:
     logger.debug(f"Creating access token for user: {user_id}")
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode = {
-        "sub": user_id,
+        "sub": user_id,  # Simplified token structure
         "exp": expire
     }
     logger.debug(f"Token payload to encode: {to_encode}")

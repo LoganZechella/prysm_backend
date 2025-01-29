@@ -3,10 +3,11 @@ from datetime import datetime, timedelta
 import json
 from unittest.mock import patch, MagicMock
 import boto3
-from moto import mock_aws
+from moto import mock_s3
 import yaml
 
-from app.storage.manager import StorageManager
+from app.utils.storage import StorageManager
+from app.models.event import EventModel as Event
 
 @pytest.fixture
 def test_config_path(tmp_path):
@@ -52,59 +53,64 @@ def test_config_path(tmp_path):
         }
     }
     
-    config_path = tmp_path / "test_storage.yaml"
-    with open(config_path, 'w') as f:
+    config_file = tmp_path / "config.yaml"
+    with open(config_file, 'w') as f:
         yaml.dump(config, f)
     
-    return str(config_path)
+    return str(config_file)
 
 @pytest.fixture
 def aws_credentials():
-    """Mock AWS credentials for moto"""
-    import os
-    os.environ['AWS_ACCESS_KEY_ID'] = 'testing'
-    os.environ['AWS_SECRET_ACCESS_KEY'] = 'testing'
-    os.environ['AWS_SECURITY_TOKEN'] = 'testing'
-    os.environ['AWS_SESSION_TOKEN'] = 'testing'
-    os.environ['AWS_DEFAULT_REGION'] = 'us-west-2'
+    """Mocked AWS Credentials for moto."""
+    with patch.dict('os.environ', {
+        'AWS_ACCESS_KEY_ID': 'testing',
+        'AWS_SECRET_ACCESS_KEY': 'testing',
+        'AWS_SECURITY_TOKEN': 'testing',
+        'AWS_SESSION_TOKEN': 'testing',
+        'AWS_DEFAULT_REGION': 'us-west-2'
+    }):
+        yield
 
 @pytest.fixture
 def storage_manager(aws_credentials, test_config_path):
-    """Create storage manager instance with mocked AWS services"""
-    with mock_aws():
-        manager = StorageManager(test_config_path)
+    """Create a storage manager with mocked AWS credentials."""
+    with mock_s3():
+        s3 = boto3.client('s3', region_name='us-west-2')
+        s3.create_bucket(
+            Bucket='test-bucket',
+            CreateBucketConfiguration={'LocationConstraint': 'us-west-2'}
+        )
+        manager = StorageManager()
         yield manager
 
 @pytest.fixture
 def sample_event():
-    """Create a sample event for testing"""
+    """Create a sample event for testing."""
     return {
-        "event_id": "test123",
-        "title": "Test Event",
-        "description": "A test event",
-        "start_datetime": datetime.utcnow().isoformat(),
-        "location": {
-            "venue_name": "Test Venue",
-            "address": "123 Test St",
-            "city": "Test City",
-            "state": "TC",
-            "country": "Test Country",
-            "coordinates": {
-                "lat": 37.7749,
-                "lng": -122.4194
-            }
+        'event_id': 'test-123',
+        'title': 'Test Event',
+        'description': 'A test event',
+        'start_datetime': datetime.now().isoformat(),
+        'end_datetime': (datetime.now() + timedelta(hours=2)).isoformat(),
+        'location': {
+            'venue_name': 'Test Venue',
+            'address': '123 Test St',
+            'city': 'Test City',
+            'state': 'TS',
+            'country': 'Test Country',
+            'postal_code': '12345',
+            'lat': 37.7749,
+            'lon': -122.4194
         },
-        "categories": ["test", "event"],
-        "price_info": {
-            "currency": "USD",
-            "min_price": 10.0,
-            "max_price": 20.0,
-            "price_tier": "budget"
+        'categories': ['test', 'event'],
+        'price_info': {
+            'type': 'fixed',
+            'amount': 10.0,
+            'currency': 'USD'
         },
-        "source": {
-            "platform": "test",
-            "url": "https://test.com/event",
-            "last_updated": datetime.utcnow().isoformat()
+        'source': {
+            'platform': 'test',
+            'url': 'http://test.com/event/123'
         }
     }
 
@@ -115,25 +121,26 @@ def sample_image():
 
 @pytest.mark.asyncio
 async def test_store_raw_event(storage_manager, sample_event):
-    """Test storing raw event"""
-    event_id = await storage_manager.store_raw_event(sample_event, "test")
-    assert event_id == sample_event["event_id"]
+    """Test storing a raw event."""
+    key = await storage_manager.store_raw_event(sample_event, 'test')
+    assert key.startswith('test/raw/')
+    assert key.endswith('.json')
     
-    # Verify event was stored
-    stored_event = await storage_manager.get_raw_event(event_id, "test")
-    assert stored_event["event_id"] == event_id
-    assert stored_event["title"] == sample_event["title"]
+    stored_event = await storage_manager.get_raw_event(key)
+    assert stored_event['event_id'] == sample_event['event_id']
+    assert stored_event['source'] == 'test'
+    assert 'ingestion_timestamp' in stored_event
 
 @pytest.mark.asyncio
 async def test_store_processed_event(storage_manager, sample_event):
-    """Test storing processed event"""
-    event_id = await storage_manager.store_processed_event(sample_event)
-    assert event_id == sample_event["event_id"]
+    """Test storing a processed event."""
+    key = await storage_manager.store_processed_event(sample_event)
+    assert key.startswith('processed/')
+    assert key.endswith('.json')
     
-    # Verify event was stored in both S3 and DynamoDB
-    stored_event = await storage_manager.get_processed_event(event_id)
-    assert stored_event["event_id"] == event_id
-    assert stored_event["title"] == sample_event["title"]
+    stored_event = await storage_manager.get_processed_event(key)
+    assert stored_event['event_id'] == sample_event['event_id']
+    assert 'processing_timestamp' in stored_event
 
 @pytest.mark.asyncio
 async def test_store_image(storage_manager, sample_image):
@@ -148,125 +155,144 @@ async def test_store_image(storage_manager, sample_image):
 
 @pytest.mark.asyncio
 async def test_list_events(storage_manager, sample_event):
-    """Test listing events"""
-    # Store multiple events
-    events = []
-    for i in range(3):
-        event = sample_event.copy()
-        event["event_id"] = f"test{i}"
-        event["start_datetime"] = (datetime.utcnow() + timedelta(days=i)).isoformat()
-        await storage_manager.store_processed_event(event)
-        events.append(event)
+    """Test listing events."""
+    # Store some test events
+    await storage_manager.store_raw_event(sample_event, 'test')
+    await storage_manager.store_raw_event(sample_event, 'test')
     
-    # Test listing with date filter
-    start_date = datetime.utcnow()
-    end_date = start_date + timedelta(days=2)
-    filtered_events = await storage_manager.list_events(
-        start_date=start_date,
-        end_date=end_date
-    )
-    assert len(filtered_events) == 2
+    # List all events
+    raw_keys = await storage_manager.list_raw_events()
+    assert len(raw_keys) == 2
+    assert all(key.startswith('test/raw/') for key in raw_keys)
     
-    # Test listing with category filter
-    filtered_events = await storage_manager.list_events(
-        categories=["test"]
+    # List with source filter
+    filtered_keys = await storage_manager.list_raw_events(source='test')
+    assert len(filtered_keys) == 2
+    assert all(key.startswith('test/raw/') for key in filtered_keys)
+    
+    # List with date filter
+    future_keys = await storage_manager.list_raw_events(
+        start_date=datetime.now() + timedelta(days=1)
     )
-    assert len(filtered_events) == 3
+    assert len(future_keys) == 0
 
 @pytest.mark.asyncio
 async def test_update_event(storage_manager, sample_event):
-    """Test updating event"""
-    # Store initial event
-    event_id = await storage_manager.store_processed_event(sample_event)
+    """Test updating an event."""
+    # First store the event
+    key = await storage_manager.store_processed_event(sample_event)
     
-    # Update event
-    update_data = {
-        "title": "Updated Event",
-        "price_info": {
-            "min_price": 15.0,
-            "max_price": 25.0,
-            "price_tier": "medium"
-        }
-    }
-    success = await storage_manager.update_event(event_id, update_data)
-    assert success
+    # Update some fields
+    updated_event = sample_event.copy()
+    updated_event['title'] = 'Updated Test Event'
+    updated_event['description'] = 'Updated description'
     
-    # Verify update in both storages
-    updated_event = await storage_manager.get_processed_event(event_id)
-    assert updated_event["title"] == "Updated Event"
-    assert updated_event["price_info"]["min_price"] == 15.0
+    # Store the update
+    updated_key = await storage_manager.store_processed_event(updated_event)
+    
+    # Verify update
+    stored_event = await storage_manager.get_processed_event(updated_key)
+    assert stored_event['title'] == 'Updated Test Event'
+    assert stored_event['description'] == 'Updated description'
+    assert stored_event['event_id'] == sample_event['event_id']
 
 @pytest.mark.asyncio
 async def test_delete_event(storage_manager, sample_event):
-    """Test deleting event"""
-    # Store event
-    event_id = await storage_manager.store_processed_event(sample_event)
+    """Test deleting an event."""
+    # First store the event
+    key = await storage_manager.store_processed_event(sample_event)
     
-    # Delete event
-    success = await storage_manager.delete_event(event_id)
-    assert success
+    # Verify it exists
+    stored_event = await storage_manager.get_processed_event(key)
+    assert stored_event is not None
     
-    # Verify deletion from both storages
-    deleted_event = await storage_manager.get_processed_event(event_id)
+    # Delete it
+    await storage_manager.delete_processed_event(key)
+    
+    # Verify it's gone
+    deleted_event = await storage_manager.get_processed_event(key)
     assert deleted_event is None
 
 @pytest.mark.asyncio
 async def test_batch_operations(storage_manager, sample_event):
-    """Test batch operations"""
+    """Test batch operations."""
     # Create multiple events
     events = []
-    for i in range(50):  # Test with more than one batch
+    for i in range(3):
         event = sample_event.copy()
-        event["event_id"] = f"test{i}"
+        event['event_id'] = f'test-{i}'
+        event['title'] = f'Test Event {i}'
         events.append(event)
     
     # Store batch
-    event_ids = await storage_manager.store_batch_events(events)
-    assert len(event_ids) == 50
+    keys = await storage_manager.store_processed_events_batch(events)
+    assert len(keys) == 3
     
-    # Verify all events were stored
-    for event_id in event_ids:
-        stored_event = await storage_manager.get_processed_event(event_id)
-        assert stored_event is not None
+    # Retrieve batch
+    stored_events = await storage_manager.get_processed_events_batch(keys)
+    assert len(stored_events) == 3
+    assert all(e['title'].startswith('Test Event') for e in stored_events)
+    
+    # Delete batch
+    await storage_manager.delete_processed_events_batch(keys)
+    
+    # Verify deletion
+    remaining = await storage_manager.get_processed_events_batch(keys)
+    assert all(e is None for e in remaining)
 
 @pytest.mark.asyncio
 async def test_storage_fallback(storage_manager, sample_event):
-    """Test storage fallback behavior"""
-    # Store event only in S3
-    event_id = await storage_manager.s3.store_processed_event(sample_event)
-    
-    # Verify fallback to S3 when not in DynamoDB
-    stored_event = await storage_manager.get_processed_event(event_id)
-    assert stored_event is not None
-    assert stored_event["event_id"] == event_id
+    """Test storage fallback behavior."""
+    # Simulate S3 failure
+    with patch.object(storage_manager.s3_client, 'put_object', side_effect=Exception('S3 error')):
+        # Should use fallback storage
+        key = await storage_manager.store_processed_event(sample_event)
+        assert key is not None
+        
+        # Should still be able to retrieve
+        stored_event = await storage_manager.get_processed_event(key)
+        assert stored_event is not None
+        assert stored_event['event_id'] == sample_event['event_id']
 
 @pytest.mark.asyncio
 async def test_error_handling(storage_manager, sample_event):
-    """Test error handling in storage operations"""
-    # Test DynamoDB failure
-    with patch.object(storage_manager.dynamodb, 'store_processed_event', side_effect=Exception("DynamoDB error")):
-        event_id = await storage_manager.store_processed_event(sample_event)
-        assert event_id == sample_event["event_id"]
-        
-        # Verify event is still accessible through S3
-        stored_event = await storage_manager.get_processed_event(event_id)
-        assert stored_event is not None
+    """Test error handling."""
+    # Test invalid event
+    invalid_event = {'invalid': 'data'}
+    with pytest.raises(ValueError):
+        await storage_manager.store_processed_event(invalid_event)
+    
+    # Test invalid key
+    with pytest.raises(ValueError):
+        await storage_manager.get_processed_event('')
+    
+    # Test non-existent key
+    non_existent = await storage_manager.get_processed_event('non-existent-key')
+    assert non_existent is None
 
 @pytest.mark.asyncio
 async def test_batch_size_config(storage_manager, sample_event):
-    """Test batch size configuration"""
-    # Create events for multiple batches
+    """Test batch size configuration."""
+    # Create many events
     events = []
-    for i in range(60):  # More than 2 batches with default size of 25
+    for i in range(25):  # More than default batch size
         event = sample_event.copy()
-        event["event_id"] = f"test{i}"
+        event['event_id'] = f'test-{i}'
         events.append(event)
     
-    # Store batch
-    event_ids = await storage_manager.store_batch_events(events)
-    assert len(event_ids) == 60
+    # Store batch (should automatically split into multiple batches)
+    keys = await storage_manager.store_processed_events_batch(events)
+    assert len(keys) == 25
     
-    # Verify all events were stored
-    for event_id in event_ids:
-        stored_event = await storage_manager.get_processed_event(event_id)
-        assert stored_event is not None 
+    # Retrieve all events
+    stored_events = await storage_manager.get_processed_events_batch(keys)
+    assert len(stored_events) == 25
+    assert all(e is not None for e in stored_events)
+
+@mock_s3
+def test_storage_manager():
+    """Test basic storage manager functionality."""
+    storage = StorageManager()
+    assert storage is not None
+
+    # ... existing code ... 

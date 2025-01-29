@@ -20,6 +20,9 @@ import asyncio
 import json
 import re
 from scrapfly import ScrapeConfig, ScrapflyClient
+from abc import ABC, abstractmethod
+from app.monitoring.performance import PerformanceMonitor
+from app.schemas.validation import ValidationPipeline, SchemaVersion
 
 from app.utils.rate_limiter import RateLimiter
 from app.utils.retry_handler import RetryHandler, RetryError
@@ -112,4 +115,151 @@ class ScrapflyBaseScraper(Generic[T]):
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
-        await self._close_session() 
+        await self._close_session()
+
+class BaseScraper(ABC):
+    """Base class for all event scrapers."""
+    
+    def __init__(self):
+        self.performance_monitor = PerformanceMonitor()
+        self.validation_pipeline = ValidationPipeline()
+        
+    @abstractmethod
+    async def search_events(
+        self,
+        location: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        categories: Optional[List[str]] = None,
+        keywords: Optional[List[str]] = None,
+        **kwargs
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for events based on criteria.
+        
+        Args:
+            location: Location to search in
+            start_date: Optional start date for events
+            end_date: Optional end date for events
+            categories: Optional list of event categories
+            keywords: Optional list of keywords to search for
+            **kwargs: Additional search parameters
+            
+        Returns:
+            List of event dictionaries
+        """
+        pass
+        
+    @abstractmethod
+    async def get_event_details(self, event_id: str) -> Dict[str, Any]:
+        """
+        Get detailed information for a specific event.
+        
+        Args:
+            event_id: ID of the event to fetch
+            
+        Returns:
+            Event details dictionary
+        """
+        pass
+        
+    def validate_event(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate event data against schema.
+        
+        Args:
+            event_data: Raw event data
+            
+        Returns:
+            Validated event data
+        """
+        try:
+            return self.validation_pipeline.validate_event(
+                event_data,
+                target_version=SchemaVersion.V2
+            )
+        except Exception as e:
+            logger.error(
+                f"Event validation failed: {str(e)}",
+                extra={
+                    'event_id': event_data.get('external_id'),
+                    'source': event_data.get('source')
+                }
+            )
+            raise
+            
+    def normalize_location(self, location_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize location data to standard format.
+        
+        Args:
+            location_data: Raw location data
+            
+        Returns:
+            Normalized location dictionary
+        """
+        required_fields = {'name', 'city', 'country'}
+        missing_fields = required_fields - set(location_data.keys())
+        if missing_fields:
+            raise ValueError(f"Missing required location fields: {missing_fields}")
+            
+        return {
+            'name': location_data['name'].strip(),
+            'address': location_data.get('address', '').strip(),
+            'city': location_data['city'].strip(),
+            'state': location_data.get('state', '').strip(),
+            'country': location_data['country'].strip(),
+            'postal_code': location_data.get('postal_code', '').strip(),
+            'latitude': float(location_data['latitude']) if 'latitude' in location_data else None,
+            'longitude': float(location_data['longitude']) if 'longitude' in location_data else None
+        }
+        
+    def normalize_price(self, price_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize price data to standard format.
+        
+        Args:
+            price_data: Raw price data
+            
+        Returns:
+            Normalized price dictionary
+        """
+        required_fields = {'amount', 'currency'}
+        missing_fields = required_fields - set(price_data.keys())
+        if missing_fields:
+            raise ValueError(f"Missing required price fields: {missing_fields}")
+            
+        return {
+            'amount': float(price_data['amount']),
+            'currency': price_data['currency'].strip().upper(),
+            'tier': price_data.get('tier', '').strip()
+        }
+        
+    def normalize_categories(self, categories: List[str]) -> List[str]:
+        """
+        Normalize category names.
+        
+        Args:
+            categories: List of category names
+            
+        Returns:
+            List of normalized category names
+        """
+        return [cat.strip().lower() for cat in categories if cat.strip()]
+        
+    def record_error(self, operation: str, error: Exception):
+        """
+        Record scraping error.
+        
+        Args:
+            operation: Name of the operation that failed
+            error: The exception that occurred
+        """
+        self.performance_monitor.record_error(
+            operation=operation,
+            error_message=str(error)
+        )
+        logger.error(
+            f"Scraping error in {operation}: {str(error)}",
+            exc_info=error
+        ) 

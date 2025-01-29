@@ -671,19 +671,18 @@ class FeatureIngestion:
             return 0.0
     
     def _calculate_social_engagement(self, social_data: Dict) -> float:
-        """Calculate social engagement score based on social activity metrics.
+        """Calculate social engagement score based on user's social activity metrics.
         
         Args:
             social_data: Dictionary containing social metrics with structure:
                 {
                     'connections': int,  # Number of connections/friends
-                    'engagement_rate': float,  # Average engagement rate (0-1)
-                    'activity_score': float,  # Platform-specific activity score (0-1)
-                    'recent_interactions': [  # Optional list of recent social interactions
-                        {
-                            'type': str,  # Type of interaction (comment, like, share, etc.)
-                            'timestamp': str,  # ISO format timestamp
-                        },
+                    'posts': int,        # Number of posts/shares
+                    'comments': int,     # Number of comments
+                    'likes': int,        # Number of likes/reactions
+                    'groups': int,       # Number of groups/communities
+                    'recent_interactions': [  # Last 30 days of interaction data
+                        {'type': 'post|comment|like', 'timestamp': '2024-01-27T10:00:00Z'},
                         ...
                     ]
                 }
@@ -695,79 +694,89 @@ class FeatureIngestion:
             if not social_data:
                 return 0.0
             
-            scores = []
-            
-            # 1. Connection score (sigmoid scaled)
+            # Calculate connection score using sigmoid to handle varying network sizes
+            # Sigmoid ensures score doesn't grow unbounded for users with many connections
             connections = social_data.get('connections', 0)
-            connection_score = 2 / (1 + np.exp(-connections/100)) - 1  # Sigmoid centered at 100 connections
-            scores.append(connection_score)
+            connection_score = 2 / (1 + np.exp(-connections/500)) - 1  # Normalized to 0-1
             
-            # 2. Engagement rate (already 0-1)
-            engagement_rate = social_data.get('engagement_rate', 0.0)
-            scores.append(float(engagement_rate))
+            # Calculate engagement rate from interactions
+            total_interactions = (
+                social_data.get('posts', 0) + 
+                social_data.get('comments', 0) + 
+                social_data.get('likes', 0)
+            )
+            engagement_rate = min(1.0, total_interactions / (connections + 1))  # Normalize by network size
             
-            # 3. Activity score (already 0-1)
-            activity_score = social_data.get('activity_score', 0.0)
-            scores.append(float(activity_score))
+            # Calculate activity score from group participation
+            groups = social_data.get('groups', 0)
+            activity_score = min(1.0, groups / 10)  # Normalize assuming 10+ groups is highly active
             
-            # 4. Recent interaction score
+            # Calculate recency score from recent interactions
             recent_interactions = social_data.get('recent_interactions', [])
-            if recent_interactions:
-                # Calculate recency-weighted interaction score
-                now = datetime.utcnow()
-                interaction_scores = []
-                
-                for interaction in recent_interactions:
-                    try:
-                        timestamp = datetime.fromisoformat(interaction['timestamp'].replace('Z', '+00:00'))
-                        days_ago = (now - timestamp).total_seconds() / (24 * 3600)
-                        
-                        # Weight interactions by recency (exponential decay with 7-day half-life)
-                        weight = np.exp(-np.log(2) * days_ago / 7)
-                        interaction_scores.append(weight)
-                    except (ValueError, KeyError):
-                        continue
-                
-                if interaction_scores:
-                    recent_score = np.mean(interaction_scores)
-                    scores.append(recent_score)
+            now = datetime.utcnow().replace(tzinfo=None)
+            
+            recency_scores = []
+            for interaction in recent_interactions:
+                try:
+                    ts = datetime.fromisoformat(interaction['timestamp'].replace('Z', '+00:00'))
+                    ts = ts.replace(tzinfo=None)
+                    days_ago = (now - ts).days
+                    # Weight recent interactions more heavily
+                    recency_scores.append(np.exp(-days_ago/30))  # 30-day decay
+                except (ValueError, KeyError):
+                    continue
+            
+            recent_interaction_score = np.mean(recency_scores) if recency_scores else 0.0
             
             # Combine scores with weights
-            weights = [0.3, 0.3, 0.2, 0.2]  # Adjust weights based on importance
-            if len(scores) < 4:
-                # Redistribute weights if we're missing the recent interactions score
-                weights = [w/(sum(weights[:len(scores)])) for w in weights[:len(scores)]]
+            weights = {
+                'connection': 0.3,
+                'engagement': 0.3,
+                'activity': 0.2,
+                'recency': 0.2
+            }
             
-            engagement_score = sum(s * w for s, w in zip(scores, weights[:len(scores)]))
+            final_score = (
+                weights['connection'] * connection_score +
+                weights['engagement'] * engagement_rate +
+                weights['activity'] * activity_score +
+                weights['recency'] * recent_interaction_score
+            )
             
-            return float(min(1.0, max(0.0, engagement_score)))
+            return float(final_score)
             
         except Exception as e:
             logger.error(f"Error calculating social engagement: {str(e)}")
             return 0.0
     
     def _calculate_collaboration_score(self, professional_data: Dict) -> float:
-        """Calculate collaboration score based on professional activity.
+        """Calculate collaboration tendency score based on professional history.
         
         Args:
             professional_data: Dictionary containing professional metrics with structure:
                 {
-                    'skills': List[str],  # Professional skills
-                    'industries': List[str],  # Industries worked in
-                    'projects': [  # Optional list of projects
+                    'projects': [
                         {
                             'team_size': int,
                             'role': str,
                             'duration_months': int,
-                            'collaboration_type': str  # e.g., 'cross-functional', 'team-lead', 'individual'
+                            'collaborative_tools': List[str]
                         },
                         ...
                     ],
-                    'recommendations': [  # Optional list of professional recommendations
+                    'recommendations': [
                         {
-                            'type': str,  # e.g., 'collaboration', 'leadership', 'technical'
-                            'strength': float,  # 0-1 score
-                            'timestamp': str
+                            'skill': str,
+                            'timestamp': str,  # ISO format
+                            'collaboration_related': bool
+                        },
+                        ...
+                    ],
+                    'skills': [
+                        {
+                            'name': str,
+                            'category': str,
+                            'endorsements': int
                         },
                         ...
                     ]
@@ -780,129 +789,107 @@ class FeatureIngestion:
             if not professional_data:
                 return 0.0
             
-            scores = []
-            
-            # 1. Project collaboration score
+            # Calculate project collaboration score
             projects = professional_data.get('projects', [])
-            if projects:
-                project_scores = []
-                
-                for project in projects:
-                    # Base score from team size (sigmoid scaled)
-                    team_size = project.get('team_size', 1)
-                    team_score = 2 / (1 + np.exp(-team_size/5)) - 1  # Sigmoid centered at team size of 5
-                    
-                    # Role multiplier
-                    role_multipliers = {
-                        'team-lead': 1.2,
-                        'cross-functional': 1.1,
-                        'individual': 0.7
-                    }
-                    role = project.get('role', '').lower()
-                    role_multiplier = role_multipliers.get(project.get('collaboration_type', '').lower(), 1.0)
-                    
-                    # Duration weight (longer projects have more weight)
-                    duration_months = project.get('duration_months', 1)
-                    duration_weight = min(1.0, duration_months / 12)  # Cap at 1 year
-                    
-                    project_score = team_score * role_multiplier * duration_weight
-                    project_scores.append(project_score)
-                
-                if project_scores:
-                    avg_project_score = np.mean(project_scores)
-                    scores.append(min(1.0, avg_project_score))
+            project_scores = []
             
-            # 2. Recommendations score
+            for project in projects:
+                # Base score from team size (sigmoid scaled)
+                team_size = project.get('team_size', 1)
+                team_score = 2 / (1 + np.exp(-team_size/10)) - 1  # Normalized to 0-1
+                
+                # Role multiplier (leadership roles weighted more)
+                role = project.get('role', '').lower()
+                role_multiplier = 1.2 if any(r in role for r in ['lead', 'manager', 'coordinator']) else 1.0
+                
+                # Duration factor (longer projects indicate sustained collaboration)
+                duration = project.get('duration_months', 0)
+                duration_factor = min(1.0, duration/24)  # Cap at 2 years
+                
+                # Tool diversity (more collaborative tools indicate stronger collaboration)
+                tools = project.get('collaborative_tools', [])
+                tool_factor = min(1.0, len(tools)/5)  # Assume 5+ tools is maximum
+                
+                project_score = team_score * role_multiplier * (duration_factor + tool_factor)/2
+                project_scores.append(project_score)
+            
+            project_collaboration = np.mean(project_scores) if project_scores else 0.0
+            
+            # Calculate recommendations score
             recommendations = professional_data.get('recommendations', [])
-            if recommendations:
-                collab_recommendations = [
-                    r for r in recommendations 
-                    if r.get('type', '').lower() in ['collaboration', 'leadership', 'teamwork']
-                ]
-                
-                if collab_recommendations:
-                    # Calculate recency-weighted recommendation score
-                    now = datetime.utcnow()
-                    weighted_scores = []
-                    
-                    for rec in collab_recommendations:
-                        try:
-                            timestamp = datetime.fromisoformat(rec['timestamp'].replace('Z', '+00:00'))
-                            days_ago = (now - timestamp).total_seconds() / (24 * 3600)
-                            
-                            # Weight by recency (1-year half-life) and strength
-                            recency_weight = np.exp(-np.log(2) * days_ago / 365)
-                            strength = float(rec.get('strength', 0.5))
-                            
-                            weighted_scores.append(strength * recency_weight)
-                        except (ValueError, KeyError):
-                            continue
-                    
-                    if weighted_scores:
-                        rec_score = np.mean(weighted_scores)
-                        scores.append(rec_score)
+            collab_recommendations = []
+            now = datetime.utcnow().replace(tzinfo=None)
             
-            # 3. Skills diversity score
+            for rec in recommendations:
+                if rec.get('collaboration_related', False):
+                    try:
+                        ts = datetime.fromisoformat(rec['timestamp'].replace('Z', '+00:00'))
+                        ts = ts.replace(tzinfo=None)
+                        days_ago = (now - ts).days
+                        # Weight recent recommendations more heavily
+                        collab_recommendations.append(np.exp(-days_ago/365))  # 1-year decay
+                    except (ValueError, KeyError):
+                        continue
+            
+            recommendation_score = np.mean(collab_recommendations) if collab_recommendations else 0.0
+            
+            # Calculate skills diversity score
             skills = professional_data.get('skills', [])
-            if skills:
-                # Group skills into categories
-                technical_skills = ['programming', 'development', 'engineering', 'technical']
-                collaborative_skills = ['communication', 'leadership', 'teamwork', 'management']
-                
-                skill_counts = {
-                    'technical': sum(1 for s in skills if any(t in s.lower() for t in technical_skills)),
-                    'collaborative': sum(1 for s in skills if any(c in s.lower() for c in collaborative_skills))
-                }
-                
-                total_skills = sum(skill_counts.values())
-                if total_skills > 0:
-                    # Calculate ratio of collaborative to total skills
-                    skill_ratio = skill_counts['collaborative'] / total_skills
-                    scores.append(skill_ratio)
+            collaborative_categories = {'leadership', 'communication', 'teamwork', 'project management', 'coordination'}
+            
+            collaborative_skills = sum(
+                1 for skill in skills 
+                if skill.get('category', '').lower() in collaborative_categories
+            )
+            skills_diversity = min(1.0, collaborative_skills / 5)  # Assume 5+ collaborative skills is maximum
             
             # Combine scores with weights
-            weights = [0.5, 0.3, 0.2]  # Projects, recommendations, skills
-            if len(scores) < 3:
-                # Redistribute weights if we're missing some scores
-                weights = [w/(sum(weights[:len(scores)])) for w in weights[:len(scores)]]
+            weights = {
+                'project': 0.4,
+                'recommendations': 0.3,
+                'skills': 0.3
+            }
             
-            collaboration_score = sum(s * w for s, w in zip(scores, weights[:len(scores)]))
+            final_score = (
+                weights['project'] * project_collaboration +
+                weights['recommendations'] * recommendation_score +
+                weights['skills'] * skills_diversity
+            )
             
-            return float(min(1.0, max(0.0, collaboration_score)))
+            return float(final_score)
             
         except Exception as e:
             logger.error(f"Error calculating collaboration score: {str(e)}")
             return 0.0
     
     def _calculate_discovery_score(self, user_data: Dict) -> float:
-        """Calculate discovery score based on user's exploration patterns.
+        """Calculate discovery tendency score based on user behavior and preferences.
         
         Args:
             user_data: Dictionary containing user activity data with structure:
                 {
-                    'event_history': [  # Past event attendance
+                    'event_history': [
                         {
-                            'event_id': str,
                             'category': str,
-                            'timestamp': str,
-                            'is_new_category': bool,  # Whether this was first time in category
-                            'distance_km': float,  # Distance from usual location
+                            'location': {'lat': float, 'lng': float},
+                            'timestamp': str,  # ISO format
+                            'is_new_category': bool
                         },
                         ...
                     ],
-                    'search_history': [  # Optional search patterns
+                    'search_history': [
                         {
                             'query': str,
-                            'timestamp': str,
-                            'filters_used': List[str]
+                            'filters': Dict,
+                            'timestamp': str
                         },
                         ...
                     ],
-                    'preferences': {  # Optional stated preferences
+                    'preferences': {
                         'discovery_settings': {
-                            'distance_willing': float,  # km
-                            'category_diversity': float,  # 0-1
-                            'novelty_preference': float  # 0-1
+                            'new_categories': bool,
+                            'distance_comfort': float,  # in km
+                            'novelty_preference': float  # 0-1 score
                         }
                     }
                 }
@@ -914,202 +901,229 @@ class FeatureIngestion:
             if not user_data:
                 return 0.0
             
-            scores = []
-            
-            # 1. Event history analysis
+            # Calculate category exploration score
             event_history = user_data.get('event_history', [])
-            if event_history:
-                # Calculate metrics from event history
-                
-                # a) Category exploration score
-                new_category_ratio = sum(1 for e in event_history if e.get('is_new_category', False)) / len(event_history)
-                scores.append(new_category_ratio)
-                
-                # b) Distance exploration score
-                distances = [e.get('distance_km', 0) for e in event_history]
-                if distances:
-                    # Normalize distances using sigmoid
-                    avg_distance = np.mean(distances)
-                    distance_score = 2 / (1 + np.exp(-avg_distance/10)) - 1  # Sigmoid centered at 10km
-                    scores.append(distance_score)
-                
-                # c) Temporal diversity
-                try:
-                    timestamps = [
-                        datetime.fromisoformat(e['timestamp'].replace('Z', '+00:00'))
-                        for e in event_history
-                        if e.get('timestamp')
-                    ]
-                    if len(timestamps) >= 2:
-                        # Calculate variance in time between events
-                        time_diffs = np.array([(timestamps[i+1] - timestamps[i]).total_seconds() 
-                                             for i in range(len(timestamps)-1)])
-                        cv = np.std(time_diffs) / np.mean(time_diffs) if np.mean(time_diffs) > 0 else 0
-                        temporal_score = 1 / (1 + cv)  # Higher variance = higher discovery score
-                        scores.append(temporal_score)
-                except (ValueError, KeyError):
-                    pass
+            total_events = len(event_history)
+            if total_events > 0:
+                new_category_events = sum(1 for event in event_history if event.get('is_new_category', False))
+                category_exploration = new_category_events / total_events
+            else:
+                category_exploration = 0.0
             
-            # 2. Search pattern analysis
+            # Calculate distance exploration score
+            if total_events > 1:
+                distances = []
+                for i in range(1, len(event_history)):
+                    try:
+                        prev = event_history[i-1]['location']
+                        curr = event_history[i]['location']
+                        
+                        # Calculate distance between consecutive events
+                        distance = np.sqrt(
+                            (curr['lat'] - prev['lat'])**2 + 
+                            (curr['lng'] - prev['lng'])**2
+                        ) * 111  # Rough km conversion
+                        distances.append(distance)
+                    except (KeyError, TypeError):
+                        continue
+                
+                if distances:
+                    avg_distance = np.mean(distances)
+                    # Normalize distance score (assume 20km is high exploration)
+                    distance_exploration = min(1.0, avg_distance / 20)
+                else:
+                    distance_exploration = 0.0
+            else:
+                distance_exploration = 0.0
+            
+            # Calculate temporal diversity score
+            if total_events > 0:
+                try:
+                    timestamps = []
+                    for event in event_history:
+                        ts = datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00'))
+                        hour = ts.hour
+                        timestamps.append(hour)
+                    
+                    # Calculate entropy of event times
+                    if timestamps:
+                        hour_counts = np.bincount(timestamps, minlength=24)
+                        probs = hour_counts / len(timestamps)
+                        entropy = -np.sum(p * np.log2(p) if p > 0 else 0 for p in probs)
+                        # Normalize entropy (max entropy for 24 hours is ~4.58)
+                        temporal_diversity = min(1.0, entropy / 4.58)
+                    else:
+                        temporal_diversity = 0.0
+                except (ValueError, KeyError):
+                    temporal_diversity = 0.0
+            else:
+                temporal_diversity = 0.0
+            
+            # Calculate search pattern scores
             search_history = user_data.get('search_history', [])
             if search_history:
-                # Analyze search diversity
+                # Calculate filter usage score
+                total_searches = len(search_history)
+                searches_with_filters = sum(1 for search in search_history if search.get('filters'))
+                filter_score = 1 - (searches_with_filters / total_searches)  # Less filtering = more discovery
                 
-                # a) Filter usage diversity
-                all_filters = set()
-                for search in search_history:
-                    all_filters.update(search.get('filters_used', []))
-                
-                filter_score = min(1.0, len(all_filters) / 5)  # Normalize to max of 5 different filters
-                scores.append(filter_score)
-                
-                # b) Query diversity
-                queries = [s.get('query', '').lower() for s in search_history]
+                # Calculate query diversity
+                queries = [search['query'].lower() for search in search_history if 'query' in search]
                 unique_queries = len(set(queries))
-                query_diversity = min(1.0, unique_queries / len(queries)) if queries else 0
-                scores.append(query_diversity)
-            
-            # 3. Stated preferences
-            preferences = user_data.get('preferences', {}).get('discovery_settings', {})
-            if preferences:
-                # Combine explicit preference indicators
-                pref_scores = []
-                
-                # Distance willingness (normalize to 50km max)
-                distance_willing = preferences.get('distance_willing', 0)
-                distance_pref = min(1.0, distance_willing / 50)
-                pref_scores.append(distance_pref)
-                
-                # Category diversity preference (already 0-1)
-                category_pref = preferences.get('category_diversity', 0.5)
-                pref_scores.append(float(category_pref))
-                
-                # Novelty preference (already 0-1)
-                novelty_pref = preferences.get('novelty_preference', 0.5)
-                pref_scores.append(float(novelty_pref))
-                
-                if pref_scores:
-                    avg_pref_score = np.mean(pref_scores)
-                    scores.append(avg_pref_score)
-            
-            # Combine all scores with weights
-            # Prioritize actual behavior over stated preferences
-            weights = {
-                'event_history': 0.4,
-                'search_patterns': 0.4,
-                'stated_preferences': 0.2
-            }
-            
-            # Group scores by category
-            grouped_scores = {
-                'event_history': scores[:3] if len(scores) >= 3 else [],
-                'search_patterns': scores[3:5] if len(scores) >= 5 else [],
-                'stated_preferences': scores[5:] if len(scores) >= 6 else []
-            }
-            
-            # Calculate weighted average for each category
-            category_scores = {}
-            for category, category_scores_list in grouped_scores.items():
-                if category_scores_list:
-                    category_scores[category] = np.mean(category_scores_list)
-            
-            # Calculate final weighted score
-            if category_scores:
-                total_weight = sum(weights[cat] for cat in category_scores.keys())
-                discovery_score = sum(
-                    score * (weights[cat]/total_weight)
-                    for cat, score in category_scores.items()
-                )
+                query_diversity = min(1.0, unique_queries / 10)  # Assume 10+ unique queries is high diversity
             else:
-                discovery_score = 0.0
+                filter_score = 0.5  # Neutral if no search history
+                query_diversity = 0.0
             
-            return float(min(1.0, max(0.0, discovery_score)))
+            # Get explicit discovery preferences
+            preferences = user_data.get('preferences', {}).get('discovery_settings', {})
+            new_categories_pref = float(preferences.get('new_categories', False))
+            distance_comfort = min(1.0, preferences.get('distance_comfort', 5) / 20)  # Normalize to 0-1
+            novelty_preference = preferences.get('novelty_preference', 0.5)
+            
+            # Combine behavior scores
+            behavior_score = np.mean([
+                category_exploration,
+                distance_exploration,
+                temporal_diversity,
+                filter_score,
+                query_diversity
+            ])
+            
+            # Combine preference scores
+            preference_score = np.mean([
+                new_categories_pref,
+                distance_comfort,
+                novelty_preference
+            ])
+            
+            # Weight behavior more heavily than stated preferences
+            weights = {
+                'behavior': 0.7,
+                'preferences': 0.3
+            }
+            
+            final_score = (
+                weights['behavior'] * behavior_score +
+                weights['preferences'] * preference_score
+            )
+            
+            return float(final_score)
             
         except Exception as e:
             logger.error(f"Error calculating discovery score: {str(e)}")
             return 0.0
     
     def _process_professional_interests(self, professional_data: Dict) -> str:
-        """Process professional interests into a standardized vector.
+        """Process professional interests into a normalized vector.
         
         Args:
             professional_data: Dictionary containing professional data with structure:
                 {
-                    'interests': List[str],  # Professional interests
-                    'industries': List[str],  # Industries worked in
-                    'roles': List[str],  # Past/current roles
-                    'certifications': List[str],  # Optional professional certifications
-                    'groups': List[str]  # Optional professional group memberships
+                    'interests': List[str],
+                    'industries': List[str],
+                    'roles': List[Dict],  # Current and past roles
+                    'certifications': List[Dict],
+                    'groups': List[Dict]  # Professional groups/associations
                 }
                 
         Returns:
-            JSON string representing normalized interest vector
+            JSON string representing normalized interest vector with metadata
         """
         try:
+            if not professional_data:
+                return json.dumps({})
+            
             # Define standard professional interest categories
-            interest_categories = {
+            categories = {
                 'technology': [
-                    'software', 'programming', 'ai', 'machine learning', 'data science',
-                    'cloud', 'cybersecurity', 'blockchain', 'iot', 'devops'
+                    'software', 'ai', 'machine learning', 'data science', 'cloud',
+                    'cybersecurity', 'blockchain', 'iot', 'devops', 'programming'
                 ],
                 'business': [
-                    'entrepreneurship', 'management', 'strategy', 'consulting',
-                    'marketing', 'sales', 'finance', 'operations', 'leadership'
+                    'entrepreneurship', 'strategy', 'marketing', 'finance', 'consulting',
+                    'management', 'operations', 'sales', 'business development'
                 ],
                 'creative': [
-                    'design', 'ux', 'ui', 'content', 'writing', 'media',
-                    'art', 'photography', 'video', 'animation'
+                    'design', 'art', 'media', 'writing', 'content creation',
+                    'ux/ui', 'digital media', 'photography', 'video production'
                 ],
                 'science': [
-                    'research', 'analytics', 'mathematics', 'physics', 'biology',
-                    'chemistry', 'engineering', 'robotics', 'space'
+                    'research', 'biology', 'physics', 'chemistry', 'mathematics',
+                    'data analysis', 'engineering', 'r&d', 'scientific computing'
                 ],
                 'healthcare': [
-                    'medical', 'health', 'biotech', 'pharma', 'wellness',
-                    'mental health', 'healthcare', 'nutrition'
+                    'medical', 'healthcare', 'biotech', 'pharmaceuticals', 'wellness',
+                    'mental health', 'healthcare technology', 'public health'
                 ],
                 'education': [
-                    'teaching', 'training', 'coaching', 'mentoring', 'e-learning',
-                    'education', 'academic', 'learning'
+                    'teaching', 'training', 'e-learning', 'education technology',
+                    'curriculum development', 'academic research', 'mentoring'
                 ],
                 'social_impact': [
-                    'nonprofit', 'sustainability', 'social enterprise', 'environment',
-                    'community', 'advocacy', 'policy', 'social justice'
+                    'sustainability', 'nonprofit', 'social enterprise', 'environment',
+                    'community development', 'social justice', 'philanthropy'
                 ],
                 'professional_services': [
-                    'legal', 'accounting', 'hr', 'recruiting', 'consulting',
-                    'project management', 'business analysis'
+                    'consulting', 'legal', 'accounting', 'hr', 'recruitment',
+                    'project management', 'business analysis', 'risk management'
                 ]
             }
             
             # Initialize interest vector
-            interest_vector = {category: 0.0 for category in interest_categories.keys()}
+            interest_vector = {category: 0.0 for category in categories.keys()}
             
-            # Process each data source with different weights
+            # Define weights for different data sources
             weights = {
-                'interests': 1.0,
-                'industries': 0.8,
-                'roles': 0.6,
-                'certifications': 0.4,
-                'groups': 0.3
+                'interests': 1.0,      # Explicitly stated interests
+                'industries': 0.8,     # Industry experience
+                'roles': 0.7,          # Role-based interests
+                'certifications': 0.6,  # Professional certifications
+                'groups': 0.5          # Group memberships
             }
             
-            # Helper function to match text against categories
-            def match_categories(text: str) -> List[str]:
+            def match_text_to_categories(text: str) -> List[str]:
+                """Helper function to match text against categories."""
+                matched = []
                 text = text.lower()
-                matches = []
-                for category, keywords in interest_categories.items():
+                for category, keywords in categories.items():
                     if any(keyword in text for keyword in keywords):
-                        matches.append(category)
-                return matches
+                        matched.append(category)
+                return matched
             
-            # Process each data source
-            for source, weight in weights.items():
-                items = professional_data.get(source, [])
-                for item in items:
-                    matches = match_categories(item)
-                    for category in matches:
-                        interest_vector[category] += weight
+            # Process explicit interests
+            for interest in professional_data.get('interests', []):
+                for category in match_text_to_categories(interest):
+                    interest_vector[category] += weights['interests']
+            
+            # Process industries
+            for industry in professional_data.get('industries', []):
+                for category in match_text_to_categories(industry):
+                    interest_vector[category] += weights['industries']
+            
+            # Process roles (current and past)
+            for role in professional_data.get('roles', []):
+                title = role.get('title', '')
+                description = role.get('description', '')
+                for text in [title, description]:
+                    for category in match_text_to_categories(text):
+                        interest_vector[category] += weights['roles']
+            
+            # Process certifications
+            for cert in professional_data.get('certifications', []):
+                name = cert.get('name', '')
+                issuer = cert.get('issuer', '')
+                for text in [name, issuer]:
+                    for category in match_text_to_categories(text):
+                        interest_vector[category] += weights['certifications']
+            
+            # Process group memberships
+            for group in professional_data.get('groups', []):
+                name = group.get('name', '')
+                description = group.get('description', '')
+                for text in [name, description]:
+                    for category in match_text_to_categories(text):
+                        interest_vector[category] += weights['groups']
             
             # Normalize vector
             total = sum(interest_vector.values())
@@ -1119,95 +1133,105 @@ class FeatureIngestion:
             # Add metadata
             result = {
                 'vector': interest_vector,
-                'primary_interests': [
-                    k for k, v in sorted(interest_vector.items(), key=lambda x: x[1], reverse=True)
-                    if v > 0.1  # Only include significant interests
-                ][:3]  # Top 3 interests
+                'primary_interests': sorted(
+                    interest_vector.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:3],
+                'timestamp': datetime.utcnow().isoformat()
             }
             
             return json.dumps(result)
             
         except Exception as e:
             logger.error(f"Error processing professional interests: {str(e)}")
-            return "[]"
+            return json.dumps({})
     
     def _process_skills(self, professional_data: Dict) -> str:
-        """Process professional skills into a standardized vector.
+        """Process professional skills into a normalized hierarchical vector.
         
         Args:
             professional_data: Dictionary containing professional data with structure:
                 {
-                    'skills': List[str],  # Professional skills
-                    'endorsements': Dict[str, int],  # Optional skill endorsements
-                    'experience': [  # Optional detailed experience
+                    'skills': [
                         {
+                            'name': str,
+                            'category': str,
+                            'endorsements': int,
+                            'level': str  # beginner, intermediate, expert
+                        },
+                        ...
+                    ],
+                    'experience': [
+                        {
+                            'role': str,
                             'skills_used': List[str],
                             'duration_months': int,
-                            'level': str  # e.g., 'beginner', 'intermediate', 'expert'
+                            'level': str  # junior, mid, senior, lead
                         },
                         ...
                     ]
                 }
                 
         Returns:
-            JSON string representing normalized skill vector
+            JSON string representing normalized skill vector with metadata
         """
         try:
-            # Define standard skill categories and their keywords
+            if not professional_data:
+                return json.dumps({})
+            
+            # Define skill categories and their keywords
             skill_categories = {
                 'technical': {
                     'programming': [
-                        'python', 'java', 'javascript', 'c++', 'ruby', 'php',
-                        'golang', 'rust', 'scala', 'swift', 'kotlin'
+                        'python', 'java', 'javascript', 'c++', 'ruby', 'go',
+                        'rust', 'scala', 'kotlin', 'swift', 'php'
                     ],
                     'web_development': [
                         'html', 'css', 'react', 'angular', 'vue', 'node.js',
                         'django', 'flask', 'spring', 'asp.net'
                     ],
-                    'data': [
-                        'sql', 'mongodb', 'postgresql', 'mysql', 'elasticsearch',
-                        'hadoop', 'spark', 'tableau', 'power bi'
+                    'data_science': [
+                        'machine learning', 'deep learning', 'nlp', 'computer vision',
+                        'statistics', 'data analysis', 'big data', 'tensorflow',
+                        'pytorch', 'scikit-learn'
                     ],
-                    'cloud': [
-                        'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'terraform',
-                        'jenkins', 'ci/cd', 'devops'
-                    ],
-                    'ai_ml': [
-                        'machine learning', 'deep learning', 'tensorflow', 'pytorch',
-                        'nlp', 'computer vision', 'data science'
+                    'devops': [
+                        'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'jenkins',
+                        'ci/cd', 'terraform', 'ansible', 'monitoring'
                     ]
                 },
                 'business': {
                     'management': [
-                        'project management', 'team leadership', 'agile', 'scrum',
-                        'strategic planning', 'risk management'
+                        'project management', 'team leadership', 'strategy',
+                        'operations', 'agile', 'scrum', 'risk management'
                     ],
                     'analysis': [
-                        'business analysis', 'requirements gathering', 'process improvement',
-                        'data analysis', 'market research'
+                        'business analysis', 'requirements gathering', 'data analysis',
+                        'market research', 'financial analysis', 'reporting'
                     ],
-                    'communication': [
-                        'presentation', 'public speaking', 'technical writing',
-                        'client relations', 'stakeholder management'
+                    'marketing': [
+                        'digital marketing', 'content marketing', 'seo', 'social media',
+                        'brand management', 'marketing analytics', 'growth'
                     ]
                 },
                 'soft_skills': {
+                    'communication': [
+                        'presentation', 'writing', 'public speaking', 'documentation',
+                        'interpersonal', 'client communication'
+                    ],
                     'collaboration': [
-                        'teamwork', 'cross-functional', 'mentoring', 'leadership',
-                        'conflict resolution'
+                        'teamwork', 'mentoring', 'leadership', 'conflict resolution',
+                        'cross-functional', 'remote collaboration'
                     ],
                     'problem_solving': [
                         'analytical thinking', 'critical thinking', 'innovation',
-                        'creativity', 'decision making'
-                    ],
-                    'work_management': [
-                        'time management', 'organization', 'multitasking',
-                        'attention to detail', 'adaptability'
+                        'creativity', 'decision making', 'troubleshooting'
                     ]
                 }
             }
             
-            # Initialize skill vector with hierarchical structure
+            # Initialize hierarchical skill vector
             skill_vector = {
                 category: {
                     subcategory: 0.0 
@@ -1216,46 +1240,51 @@ class FeatureIngestion:
                 for category, subcategories in skill_categories.items()
             }
             
-            def match_skill(skill: str) -> List[tuple]:
-                """Match a skill to categories and subcategories."""
-                skill = skill.lower()
+            def match_skill_to_categories(skill_name: str) -> List[tuple]:
+                """Match skill to categories and subcategories."""
                 matches = []
+                skill_name = skill_name.lower()
                 for category, subcategories in skill_categories.items():
                     for subcategory, keywords in subcategories.items():
-                        if any(keyword in skill for keyword in keywords):
+                        if any(keyword in skill_name for keyword in keywords):
                             matches.append((category, subcategory))
                 return matches
             
-            # Process skills with endorsements
+            # Process explicit skills with endorsements
             skills = professional_data.get('skills', [])
-            endorsements = professional_data.get('endorsements', {})
-            
             for skill in skills:
-                # Get endorsement count (default to 1 if no endorsements)
-                endorsement_weight = min(1.0 + np.log1p(endorsements.get(skill, 0)), 5.0)
-                
-                # Match skill to categories
-                matches = match_skill(skill)
-                for category, subcategory in matches:
-                    skill_vector[category][subcategory] += endorsement_weight
-            
-            # Process experience
-            experience = professional_data.get('experience', [])
-            for exp in experience:
-                # Calculate experience weight based on duration and level
-                duration_months = exp.get('duration_months', 0)
-                level_multipliers = {
+                skill_name = skill.get('name', '')
+                endorsements = skill.get('endorsements', 0)
+                level_multiplier = {
                     'beginner': 0.5,
                     'intermediate': 1.0,
                     'expert': 1.5
-                }
-                level = exp.get('level', 'intermediate').lower()
-                exp_weight = min(1.0 + np.log1p(duration_months/12), 3.0) * level_multipliers.get(level, 1.0)
+                }.get(skill.get('level', 'intermediate'), 1.0)
                 
-                # Process skills used in this experience
-                for skill in exp.get('skills_used', []):
-                    matches = match_skill(skill)
-                    for category, subcategory in matches:
+                # Calculate skill weight based on endorsements and level
+                skill_weight = (1 + np.log1p(endorsements)) * level_multiplier
+                
+                # Update skill vector
+                for category, subcategory in match_skill_to_categories(skill_name):
+                    skill_vector[category][subcategory] += skill_weight
+            
+            # Process experience data
+            experience = professional_data.get('experience', [])
+            for exp in experience:
+                duration_months = exp.get('duration_months', 0)
+                level_multiplier = {
+                    'junior': 0.5,
+                    'mid': 1.0,
+                    'senior': 1.5,
+                    'lead': 2.0
+                }.get(exp.get('level', 'mid'), 1.0)
+                
+                # Calculate experience weight
+                exp_weight = (1 + np.log1p(duration_months)) * level_multiplier
+                
+                # Process skills used in role
+                for skill_name in exp.get('skills_used', []):
+                    for category, subcategory in match_skill_to_categories(skill_name):
                         skill_vector[category][subcategory] += exp_weight
             
             # Normalize vectors within each category
@@ -1271,167 +1300,180 @@ class FeatureIngestion:
                 category: sum(subcategories.values())
                 for category, subcategories in skill_vector.items()
             }
+            total = sum(category_totals.values())
+            if total > 0:
+                category_totals = {k: v/total for k, v in category_totals.items()}
             
-            # Prepare final result with metadata
+            # Prepare result with detailed vectors and summary
             result = {
                 'detailed_vector': skill_vector,
                 'category_summary': category_totals,
-                'primary_skills': [
-                    {
-                        'category': category,
-                        'subcategories': [
-                            k for k, v in sorted(subcategories.items(), key=lambda x: x[1], reverse=True)
-                            if v > 0.1
-                        ][:2]  # Top 2 subcategories per category
-                    }
-                    for category, subcategories in skill_vector.items()
-                    if sum(subcategories.values()) > 0
-                ]
+                'primary_skills': sorted(
+                    [
+                        (f"{category}.{subcategory}", value)
+                        for category, subcategories in skill_vector.items()
+                        for subcategory, value in subcategories.items()
+                        if value > 0.1  # Only include significant skills
+                    ],
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:5],  # Top 5 skills
+                'timestamp': datetime.utcnow().isoformat()
             }
             
             return json.dumps(result)
             
         except Exception as e:
             logger.error(f"Error processing skills: {str(e)}")
-            return "[]"
+            return json.dumps({})
     
     def _process_industries(self, professional_data: Dict) -> str:
-        """Process industries into a standardized vector.
+        """Process professional industry experience into a normalized vector.
         
         Args:
             professional_data: Dictionary containing professional data with structure:
                 {
-                    'industries': List[str],  # Industries worked in
-                    'experience': [  # Optional detailed experience
+                    'industries': [
                         {
-                            'industry': str,
+                            'name': str,
                             'duration_months': int,
-                            'role_level': str  # e.g., 'entry', 'mid', 'senior', 'executive'
+                            'role_level': str  # junior, mid, senior, lead
                         },
                         ...
                     ],
-                    'interests': List[str]  # Optional industry interests
+                    'companies': [
+                        {
+                            'name': str,
+                            'industry': str,
+                            'size': str,  # startup, mid-size, enterprise
+                            'duration_months': int
+                        },
+                        ...
+                    ]
                 }
                 
         Returns:
-            JSON string representing normalized industry vector
+            JSON string representing normalized industry vector with metadata
         """
         try:
+            if not professional_data:
+                return json.dumps({})
+            
             # Define standard industry categories and their keywords
             industry_categories = {
                 'technology': {
                     'software': [
-                        'software', 'saas', 'enterprise software', 'mobile apps',
-                        'web development', 'cloud computing'
+                        'software', 'saas', 'cloud computing', 'enterprise software',
+                        'mobile apps', 'web development', 'cybersecurity'
                     ],
                     'hardware': [
-                        'hardware', 'electronics', 'semiconductors', 'iot',
-                        'robotics', 'telecommunications'
+                        'hardware', 'semiconductors', 'electronics', 'robotics',
+                        'iot', 'telecommunications', 'networking'
                     ],
                     'internet': [
                         'internet', 'e-commerce', 'digital media', 'social media',
-                        'online services', 'digital platforms'
+                        'online services', 'streaming', 'digital platforms'
                     ]
                 },
-                'business_services': {
+                'professional_services': {
                     'consulting': [
                         'consulting', 'professional services', 'business services',
-                        'management consulting', 'strategy consulting'
+                        'management consulting', 'it consulting', 'advisory'
                     ],
                     'financial': [
-                        'banking', 'finance', 'investment', 'insurance',
-                        'fintech', 'wealth management'
+                        'financial services', 'banking', 'investment', 'insurance',
+                        'fintech', 'wealth management', 'capital markets'
                     ],
-                    'marketing': [
-                        'marketing', 'advertising', 'pr', 'market research',
-                        'digital marketing', 'branding'
+                    'legal': [
+                        'legal', 'law', 'compliance', 'regulatory', 'intellectual property',
+                        'corporate law', 'legal tech'
                     ]
                 },
                 'healthcare': {
                     'medical': [
-                        'healthcare', 'hospitals', 'medical devices', 'pharmaceuticals',
-                        'biotechnology', 'health services'
+                        'healthcare', 'medical', 'hospitals', 'clinics',
+                        'healthcare providers', 'medical devices'
                     ],
-                    'wellness': [
-                        'wellness', 'fitness', 'mental health', 'nutrition',
-                        'healthcare technology', 'telehealth'
+                    'biotech': [
+                        'biotech', 'pharmaceuticals', 'life sciences', 'research',
+                        'drug development', 'clinical research'
+                    ],
+                    'health_tech': [
+                        'health tech', 'digital health', 'telemedicine', 'health it',
+                        'medical software', 'healthcare analytics'
                     ]
                 },
-                'education': {
-                    'traditional': [
-                        'education', 'higher education', 'k-12', 'academic',
-                        'schools', 'universities'
+                'media_entertainment': {
+                    'media': [
+                        'media', 'publishing', 'news', 'broadcasting',
+                        'digital media', 'content creation'
                     ],
-                    'edtech': [
-                        'edtech', 'e-learning', 'online education', 'training',
-                        'professional development', 'educational services'
-                    ]
-                },
-                'manufacturing': {
-                    'traditional': [
-                        'manufacturing', 'industrial', 'automotive', 'aerospace',
-                        'machinery', 'construction'
+                    'entertainment': [
+                        'entertainment', 'gaming', 'music', 'film', 'television',
+                        'streaming services', 'interactive media'
                     ],
-                    'advanced': [
-                        'advanced manufacturing', '3d printing', 'smart manufacturing',
-                        'industrial automation', 'industry 4.0'
+                    'advertising': [
+                        'advertising', 'marketing', 'pr', 'digital marketing',
+                        'brand management', 'creative services'
                     ]
                 }
             }
             
-            # Initialize industry vector with hierarchical structure
+            # Initialize industry vector
             industry_vector = {
                 category: {
-                    subcategory: 0.0 
+                    subcategory: 0.0
                     for subcategory in subcategories.keys()
                 }
                 for category, subcategories in industry_categories.items()
             }
             
-            def match_industry(industry: str) -> List[tuple]:
-                """Match an industry to categories and subcategories."""
-                industry = industry.lower()
+            def match_industry(industry_name: str) -> List[tuple]:
+                """Match industry name to categories and subcategories."""
                 matches = []
+                industry_name = industry_name.lower()
                 for category, subcategories in industry_categories.items():
                     for subcategory, keywords in subcategories.items():
-                        if any(keyword in industry for keyword in keywords):
+                        if any(keyword in industry_name for keyword in keywords):
                             matches.append((category, subcategory))
                 return matches
             
-            # Process listed industries
+            # Process explicit industry experience
             industries = professional_data.get('industries', [])
             for industry in industries:
-                matches = match_industry(industry)
-                for category, subcategory in matches:
-                    industry_vector[category][subcategory] += 1.0
-            
-            # Process experience with weights
-            experience = professional_data.get('experience', [])
-            for exp in experience:
-                # Calculate experience weight based on duration and role level
-                duration_months = exp.get('duration_months', 0)
-                level_multipliers = {
-                    'entry': 0.5,
+                industry_name = industry.get('name', '')
+                duration_months = industry.get('duration_months', 0)
+                level_multiplier = {
+                    'junior': 0.5,
                     'mid': 1.0,
                     'senior': 1.5,
-                    'executive': 2.0
-                }
-                level = exp.get('role_level', 'mid').lower()
-                exp_weight = min(1.0 + np.log1p(duration_months/12), 3.0) * level_multipliers.get(level, 1.0)
+                    'lead': 2.0
+                }.get(industry.get('role_level', 'mid'), 1.0)
                 
-                # Process industry experience
-                industry = exp.get('industry', '')
-                if industry:
-                    matches = match_industry(industry)
-                    for category, subcategory in matches:
-                        industry_vector[category][subcategory] += exp_weight
+                # Calculate experience weight
+                exp_weight = (1 + np.log1p(duration_months)) * level_multiplier
+                
+                # Update industry vector
+                for category, subcategory in match_industry(industry_name):
+                    industry_vector[category][subcategory] += exp_weight
             
-            # Process interests with lower weight
-            interests = professional_data.get('interests', [])
-            for interest in interests:
-                matches = match_industry(interest)
-                for category, subcategory in matches:
-                    industry_vector[category][subcategory] += 0.5
+            # Process company experience
+            companies = professional_data.get('companies', [])
+            for company in companies:
+                industry_name = company.get('industry', '')
+                duration_months = company.get('duration_months', 0)
+                size_multiplier = {
+                    'startup': 1.2,  # More hands-on experience in startups
+                    'mid-size': 1.0,
+                    'enterprise': 0.8  # More specialized roles in large companies
+                }.get(company.get('size', 'mid-size'), 1.0)
+                
+                # Calculate experience weight
+                exp_weight = (1 + np.log1p(duration_months)) * size_multiplier
+                
+                # Update industry vector
+                for category, subcategory in match_industry(industry_name):
+                    industry_vector[category][subcategory] += exp_weight
             
             # Normalize vectors within each category
             for category, subcategories in industry_vector.items():
@@ -1446,193 +1488,1118 @@ class FeatureIngestion:
                 category: sum(subcategories.values())
                 for category, subcategories in industry_vector.items()
             }
+            total = sum(category_totals.values())
+            if total > 0:
+                category_totals = {k: v/total for k, v in category_totals.items()}
             
-            # Prepare final result with metadata
+            # Prepare result with detailed vectors and summary
             result = {
                 'detailed_vector': industry_vector,
                 'category_summary': category_totals,
-                'primary_industries': [
-                    {
-                        'category': category,
-                        'subcategories': [
-                            k for k, v in sorted(subcategories.items(), key=lambda x: x[1], reverse=True)
-                            if v > 0.1
-                        ][:2]  # Top 2 subcategories per category
-                    }
-                    for category, subcategories in industry_vector.items()
-                    if sum(subcategories.values()) > 0
-                ]
+                'primary_industries': sorted(
+                    [
+                        (f"{category}.{subcategory}", value)
+                        for category, subcategories in industry_vector.items()
+                        for subcategory, value in subcategories.items()
+                        if value > 0.1  # Only include significant experience
+                    ],
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:3],  # Top 3 industries
+                'timestamp': datetime.utcnow().isoformat()
             }
             
             return json.dumps(result)
             
         except Exception as e:
             logger.error(f"Error processing industries: {str(e)}")
-            return "[]"
+            return json.dumps({})
     
     def _process_activity_times(self, activity_history: List) -> str:
-        """Process activity times into a pattern vector."""
-        # TODO: Implement activity times processing
-        return "[]"  # Placeholder
-    
-    def _calculate_engagement_level(self, user_data: Dict) -> float:
-        """Calculate user engagement level."""
-        # TODO: Implement engagement level calculation
-        return 0.0  # Placeholder
-    
-    def _calculate_exploration_score(self, user_data: Dict) -> float:
-        """Calculate exploration score."""
-        # TODO: Implement exploration score calculation
-        return 0.0  # Placeholder
-    
-    def _generate_text_embedding(self, text: str) -> str:
-        """Generate text embedding vector."""
-        # TODO: Implement text embedding generation
-        return "[]"  # Placeholder
-    
-    def _process_categories(self, categories: List) -> str:
-        """Process categories into a vector."""
-        # TODO: Implement category processing
-        return "[]"  # Placeholder
-    
-    def _extract_topics(self, description: str) -> str:
-        """Extract topics from description."""
-        # TODO: Implement topic extraction
-        return "[]"  # Placeholder
-    
-    def _normalize_price(self, price: float) -> float:
-        """Normalize price value."""
-        # TODO: Implement price normalization
-        return 0.0  # Placeholder
-    
-    def _normalize_capacity(self, capacity: int) -> float:
-        """Normalize capacity value."""
-        # TODO: Implement capacity normalization
-        return 0.0  # Placeholder
-    
-    def _extract_time_of_day(self, start_time: str) -> int:
-        """Extract hour of day from start time."""
-        # TODO: Implement time extraction
-        return 0  # Placeholder
-    
-    def _extract_day_of_week(self, start_time: str) -> int:
-        """Extract day of week from start time."""
-        # TODO: Implement day extraction
-        return 0  # Placeholder
-    
-    def _calculate_duration(self, start_time: str, end_time: str) -> float:
-        """Calculate event duration in hours."""
-        # TODO: Implement duration calculation
-        return 0.0  # Placeholder
-    
-    def _calculate_attendance_score(self, event_data: Dict) -> float:
-        """Calculate attendance score."""
-        # TODO: Implement attendance score calculation
-        return 0.0  # Placeholder
-    
-    def _calculate_social_score(self, event_data: Dict) -> float:
-        """Calculate social score."""
-        # TODO: Implement social score calculation
-        return 0.0  # Placeholder
-    
-    def _calculate_organizer_rating(self, event_history: List) -> float:
-        """Calculate a user's event organizing capability score.
+        """Process activity times into a pattern vector.
         
         Args:
-            event_history: List of events organized by the user with structure:
+            activity_history: List of activity entries with structure:
                 [
                     {
-                        'event_id': str,
-                        'attendees': int,
-                        'rating': float,  # Average rating 0-5
-                        'reviews': int,   # Number of reviews
-                        'complexity': str, # 'low', 'medium', 'high'
-                        'duration_hours': float,
-                        'budget': float,
-                        'team_size': int,
-                        'type': str,      # Event type
-                        'success_metrics': {
-                            'attendance_rate': float,
-                            'satisfaction': float,
-                            'budget_adherence': float,
-                            'timeline_adherence': float
-                        }
+                        'type': str,  # event, search, interaction
+                        'timestamp': str,  # ISO format
+                        'duration_minutes': int  # optional
                     },
                     ...
                 ]
                 
         Returns:
-            Float between 0 and 1 representing organizing capability
+            JSON string representing activity patterns with hourly and daily distributions
+        """
+        try:
+            if not activity_history:
+                return json.dumps({})
+            
+            # Initialize time pattern vectors
+            hourly_distribution = [0] * 24  # 24 hours
+            daily_distribution = [0] * 7   # 7 days of week
+            duration_by_time = [0] * 24    # Average duration by hour
+            duration_counts = [0] * 24     # Count of activities with duration by hour
+            
+            # Process each activity
+            total_activities = 0
+            for activity in activity_history:
+                try:
+                    # Parse timestamp
+                    timestamp = datetime.fromisoformat(
+                        activity['timestamp'].replace('Z', '+00:00')
+                    )
+                    
+                    # Update distributions
+                    hour = timestamp.hour
+                    day = timestamp.weekday()
+                    
+                    hourly_distribution[hour] += 1
+                    daily_distribution[day] += 1
+                    total_activities += 1
+                    
+                    # Process duration if available
+                    duration = activity.get('duration_minutes', 0)
+                    if duration > 0:
+                        duration_by_time[hour] += duration
+                        duration_counts[hour] += 1
+                    
+                except (ValueError, KeyError) as e:
+                    logger.warning(f"Invalid timestamp format: {activity.get('timestamp')}")
+                    continue
+            
+            # Normalize distributions
+            if total_activities > 0:
+                hourly_distribution = [count/total_activities for count in hourly_distribution]
+                daily_distribution = [count/total_activities for count in daily_distribution]
+            
+            # Calculate average duration by hour
+            avg_duration_by_time = []
+            for hour in range(24):
+                if duration_counts[hour] > 0:
+                    avg_duration_by_time.append(
+                        duration_by_time[hour] / duration_counts[hour]
+                    )
+                else:
+                    avg_duration_by_time.append(0)
+            
+            # Calculate peak activity times
+            peak_hours = sorted(
+                range(24),
+                key=lambda x: hourly_distribution[x],
+                reverse=True
+            )[:3]
+            
+            peak_days = sorted(
+                range(7),
+                key=lambda x: daily_distribution[x],
+                reverse=True
+            )[:3]
+            
+            # Calculate activity clusters
+            clusters = []
+            current_cluster = []
+            threshold = np.mean(hourly_distribution) + np.std(hourly_distribution)
+            
+            for hour in range(24):
+                if hourly_distribution[hour] > threshold:
+                    current_cluster.append(hour)
+                elif current_cluster:
+                    clusters.append(current_cluster)
+                    current_cluster = []
+            
+            if current_cluster:
+                clusters.append(current_cluster)
+            
+            # Prepare result
+            result = {
+                'hourly_distribution': hourly_distribution,
+                'daily_distribution': daily_distribution,
+                'avg_duration_by_hour': avg_duration_by_time,
+                'peak_hours': peak_hours,
+                'peak_days': peak_days,
+                'activity_clusters': clusters,
+                'metadata': {
+                    'total_activities': total_activities,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+            }
+            
+            return json.dumps(result)
+            
+        except Exception as e:
+            logger.error(f"Error processing activity times: {str(e)}")
+            return json.dumps({})
+    
+    def _calculate_engagement_level(self, user_data: Dict) -> float:
+        """Calculate user engagement level based on various activity metrics.
+        
+        Args:
+            user_data: Dictionary containing user activity data with structure:
+                {
+                    'activity_history': [
+                        {
+                            'type': str,  # event, search, interaction
+                            'timestamp': str,
+                            'duration_minutes': int
+                        },
+                        ...
+                    ],
+                    'event_interactions': [
+                        {
+                            'type': str,  # view, save, register, attend
+                            'timestamp': str
+                        },
+                        ...
+                    ],
+                    'profile_completeness': {
+                        'required_fields': int,
+                        'optional_fields': int,
+                        'filled_required': int,
+                        'filled_optional': int
+                    },
+                    'notification_settings': {
+                        'email_enabled': bool,
+                        'push_enabled': bool,
+                        'categories_selected': List[str]
+                    }
+                }
+                
+        Returns:
+            Float between 0 and 1 representing overall engagement level
+        """
+        try:
+            if not user_data:
+                return 0.0
+            
+            scores = {}
+            
+            # 1. Activity Frequency Score
+            activity_history = user_data.get('activity_history', [])
+            if activity_history:
+                # Get timestamps of activities
+                timestamps = []
+                now = datetime.utcnow().replace(tzinfo=None)
+                
+                for activity in activity_history:
+                    try:
+                        ts = datetime.fromisoformat(activity['timestamp'].replace('Z', '+00:00'))
+                        ts = ts.replace(tzinfo=None)
+                        timestamps.append(ts)
+                    except (ValueError, KeyError):
+                        continue
+                
+                if timestamps:
+                    # Calculate activity frequency over last 30 days
+                    recent_activities = sum(
+                        1 for ts in timestamps
+                        if (now - ts).days <= 30
+                    )
+                    # Normalize: assume 20+ activities per month is high engagement
+                    scores['frequency'] = min(1.0, recent_activities / 20)
+                else:
+                    scores['frequency'] = 0.0
+            else:
+                scores['frequency'] = 0.0
+            
+            # 2. Event Interaction Score
+            event_interactions = user_data.get('event_interactions', [])
+            if event_interactions:
+                # Weight different interaction types
+                interaction_weights = {
+                    'view': 0.2,
+                    'save': 0.4,
+                    'register': 0.7,
+                    'attend': 1.0
+                }
+                
+                # Calculate weighted interaction score
+                total_score = 0
+                total_possible = 0
+                
+                for interaction in event_interactions:
+                    weight = interaction_weights.get(interaction.get('type', 'view'), 0.2)
+                    total_score += weight
+                    total_possible += 1
+                
+                if total_possible > 0:
+                    # Normalize: assume 10+ interactions is high engagement
+                    scores['interaction'] = min(1.0, total_score / (10 * np.mean(list(interaction_weights.values()))))
+                else:
+                    scores['interaction'] = 0.0
+            else:
+                scores['interaction'] = 0.0
+            
+            # 3. Profile Completeness Score
+            profile_data = user_data.get('profile_completeness', {})
+            if profile_data:
+                required_fields = profile_data.get('required_fields', 0)
+                optional_fields = profile_data.get('optional_fields', 0)
+                filled_required = profile_data.get('filled_required', 0)
+                filled_optional = profile_data.get('filled_optional', 0)
+                
+                if required_fields > 0:
+                    required_score = filled_required / required_fields
+                else:
+                    required_score = 1.0
+                
+                if optional_fields > 0:
+                    optional_score = filled_optional / optional_fields
+                else:
+                    optional_score = 1.0
+                
+                # Weight required fields more heavily
+                scores['profile'] = (0.7 * required_score) + (0.3 * optional_score)
+            else:
+                scores['profile'] = 0.0
+            
+            # 4. Notification Engagement Score
+            notification_settings = user_data.get('notification_settings', {})
+            if notification_settings:
+                # Calculate based on enabled notifications and category selections
+                channels_enabled = sum([
+                    notification_settings.get('email_enabled', False),
+                    notification_settings.get('push_enabled', False)
+                ])
+                
+                categories_selected = len(notification_settings.get('categories_selected', []))
+                
+                # Normalize: assume 2 channels and 5+ categories is high engagement
+                channel_score = channels_enabled / 2
+                category_score = min(1.0, categories_selected / 5)
+                
+                scores['notification'] = (channel_score + category_score) / 2
+            else:
+                scores['notification'] = 0.0
+            
+            # Calculate final engagement score with weights
+            weights = {
+                'frequency': 0.35,    # Activity frequency is most important
+                'interaction': 0.30,  # Event interactions are strong indicators
+                'profile': 0.20,      # Profile completeness shows investment
+                'notification': 0.15  # Notification settings show intent to engage
+            }
+            
+            final_score = sum(
+                weights[metric] * score
+                for metric, score in scores.items()
+            )
+            
+            return float(final_score)
+            
+        except Exception as e:
+            logger.error(f"Error calculating engagement level: {str(e)}")
+            return 0.0
+    
+    def _calculate_exploration_score(self, user_data: Dict) -> float:
+        """Calculate user's exploration tendency based on behavior patterns.
+        
+        Args:
+            user_data: Dictionary containing user behavior data with structure:
+                {
+                    'event_history': [
+                        {
+                            'category': str,
+                            'location': {'lat': float, 'lng': float},
+                            'price': float,
+                            'timestamp': str,
+                            'is_new_category': bool
+                        },
+                        ...
+                    ],
+                    'search_history': [
+                        {
+                            'query': str,
+                            'filters': Dict,
+                            'timestamp': str
+                        },
+                        ...
+                    ],
+                    'preferences': {
+                        'max_distance': float,  # in km
+                        'price_range': {'min': float, 'max': float},
+                        'preferred_categories': List[str],
+                        'excluded_categories': List[str]
+                    }
+                }
+                
+        Returns:
+            Float between 0 and 1 representing exploration tendency
+        """
+        try:
+            if not user_data:
+                return 0.0
+            
+            scores = {}
+            
+            # 1. Category Exploration Score
+            event_history = user_data.get('event_history', [])
+            if event_history:
+                # Track unique categories and new category adoption
+                categories_seen = set()
+                new_category_count = 0
+                total_events = len(event_history)
+                
+                for event in event_history:
+                    category = event.get('category')
+                    if category:
+                        if category not in categories_seen:
+                            new_category_count += 1
+                            categories_seen.add(category)
+                
+                if total_events > 0:
+                    # Calculate both breadth and willingness to try new categories
+                    category_breadth = len(categories_seen) / max(10, total_events)  # Assume 10+ categories is diverse
+                    new_category_ratio = new_category_count / total_events
+                    scores['category'] = (category_breadth + new_category_ratio) / 2
+                else:
+                    scores['category'] = 0.0
+            else:
+                scores['category'] = 0.0
+            
+            # 2. Location Exploration Score
+            if event_history:
+                try:
+                    # Calculate average distance between consecutive events
+                    distances = []
+                    for i in range(1, len(event_history)):
+                        prev = event_history[i-1].get('location', {})
+                        curr = event_history[i].get('location', {})
+                        
+                        if prev and curr:
+                            distance = np.sqrt(
+                                (curr['lat'] - prev['lat'])**2 + 
+                                (curr['lng'] - prev['lng'])**2
+                            ) * 111  # Rough km conversion
+                            distances.append(distance)
+                    
+                    if distances:
+                        avg_distance = np.mean(distances)
+                        max_distance = user_data.get('preferences', {}).get('max_distance', 20)
+                        scores['location'] = min(1.0, avg_distance / max_distance)
+                    else:
+                        scores['location'] = 0.0
+                except (KeyError, TypeError):
+                    scores['location'] = 0.0
+            else:
+                scores['location'] = 0.0
+            
+            # 3. Price Range Exploration Score
+            if event_history:
+                try:
+                    prices = [event['price'] for event in event_history if 'price' in event]
+                    if prices:
+                        price_range = user_data.get('preferences', {}).get('price_range', {})
+                        min_price = price_range.get('min', min(prices))
+                        max_price = price_range.get('max', max(prices))
+                        
+                        # Calculate how much of the available price range is explored
+                        price_coverage = (max(prices) - min(prices)) / (max_price - min_price) if max_price > min_price else 1.0
+                        
+                        # Calculate price variance normalized by mean
+                        mean_price = np.mean(prices)
+                        cv = np.std(prices) / mean_price if mean_price > 0 else 0
+                        
+                        scores['price'] = (price_coverage + min(1.0, cv)) / 2
+                    else:
+                        scores['price'] = 0.0
+                except (KeyError, TypeError):
+                    scores['price'] = 0.0
+            else:
+                scores['price'] = 0.0
+            
+            # 4. Search Pattern Score
+            search_history = user_data.get('search_history', [])
+            if search_history:
+                # Analyze search patterns
+                total_searches = len(search_history)
+                unique_queries = len(set(
+                    search['query'].lower() 
+                    for search in search_history 
+                    if 'query' in search
+                ))
+                
+                # Calculate filter flexibility
+                filter_counts = []
+                for search in search_history:
+                    filters = search.get('filters', {})
+                    filter_counts.append(len(filters))
+                
+                if filter_counts:
+                    avg_filters = np.mean(filter_counts)
+                    # Less filtering indicates more exploration
+                    filter_flexibility = 1 - min(1.0, avg_filters / 5)  # Assume 5+ filters is restrictive
+                else:
+                    filter_flexibility = 1.0
+                
+                # Combine query diversity and filter flexibility
+                query_diversity = unique_queries / total_searches if total_searches > 0 else 0
+                scores['search'] = (query_diversity + filter_flexibility) / 2
+            else:
+                scores['search'] = 0.0
+            
+            # 5. Category Preference Flexibility
+            preferences = user_data.get('preferences', {})
+            preferred_categories = set(preferences.get('preferred_categories', []))
+            excluded_categories = set(preferences.get('excluded_categories', []))
+            
+            # Calculate ratio of excluded to total categories
+            total_categories = len(preferred_categories | excluded_categories)
+            if total_categories > 0:
+                flexibility = 1 - (len(excluded_categories) / total_categories)
+                scores['flexibility'] = flexibility
+            else:
+                scores['flexibility'] = 1.0  # No restrictions means maximum flexibility
+            
+            # Calculate final exploration score with weights
+            weights = {
+                'category': 0.25,    # Category exploration is key indicator
+                'location': 0.20,    # Location variety shows willingness to travel
+                'price': 0.15,       # Price range exploration
+                'search': 0.25,      # Search behavior is strong indicator
+                'flexibility': 0.15  # Preference flexibility
+            }
+            
+            final_score = sum(
+                weights[metric] * score
+                for metric, score in scores.items()
+            )
+            
+            return float(final_score)
+            
+        except Exception as e:
+            logger.error(f"Error calculating exploration score: {str(e)}")
+            return 0.0
+    
+    def _generate_text_embedding(self, text: str) -> str:
+        """Generate text embedding vector using a simple TF-IDF approach.
+        
+        Args:
+            text: Input text to generate embedding for
+            
+        Returns:
+            JSON string representing text embedding vector
+        """
+        try:
+            if not text:
+                return json.dumps([])
+            
+            # Preprocess text
+            text = text.lower()
+            # Remove special characters and extra whitespace
+            text = ' '.join(''.join(c if c.isalnum() or c.isspace() else ' ' for c in text).split())
+            
+            # Define common words to exclude
+            stop_words = {
+                'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from',
+                'has', 'he', 'in', 'is', 'it', 'its', 'of', 'on', 'that', 'the',
+                'to', 'was', 'were', 'will', 'with'
+            }
+            
+            # Split into words and remove stop words
+            words = [w for w in text.split() if w not in stop_words]
+            
+            # Calculate term frequencies
+            term_freq = defaultdict(int)
+            for word in words:
+                term_freq[word] += 1
+            
+            # Convert to vector (normalized)
+            total_terms = sum(term_freq.values())
+            if total_terms > 0:
+                vector = {word: count/total_terms for word, count in term_freq.items()}
+            else:
+                vector = {}
+            
+            return json.dumps(vector)
+            
+        except Exception as e:
+            logger.error(f"Error generating text embedding: {str(e)}")
+            return json.dumps([])
+    
+    def _process_categories(self, categories: List) -> str:
+        """Process categories into a normalized vector.
+        
+        Args:
+            categories: List of category strings
+            
+        Returns:
+            JSON string representing category vector
+        """
+        try:
+            if not categories:
+                return json.dumps({})
+            
+            # Define standard category groups
+            category_groups = {
+                'arts_culture': [
+                    'art', 'culture', 'museum', 'gallery', 'exhibition',
+                    'theater', 'dance', 'performance', 'film', 'cinema'
+                ],
+                'business_professional': [
+                    'business', 'professional', 'networking', 'career',
+                    'entrepreneurship', 'startup', 'workshop', 'seminar'
+                ],
+                'community_causes': [
+                    'community', 'nonprofit', 'charity', 'volunteer',
+                    'activism', 'social', 'environment', 'sustainability'
+                ],
+                'education_learning': [
+                    'education', 'learning', 'workshop', 'class', 'training',
+                    'lecture', 'conference', 'seminar', 'skills'
+                ],
+                'entertainment_lifestyle': [
+                    'entertainment', 'lifestyle', 'fashion', 'food', 'drink',
+                    'music', 'concert', 'festival', 'party', 'nightlife'
+                ],
+                'health_wellness': [
+                    'health', 'wellness', 'fitness', 'yoga', 'meditation',
+                    'sports', 'outdoor', 'recreation', 'mental health'
+                ],
+                'science_tech': [
+                    'science', 'technology', 'tech', 'innovation', 'digital',
+                    'software', 'data', 'ai', 'robotics', 'engineering'
+                ],
+                'social_networking': [
+                    'social', 'networking', 'meetup', 'gathering', 'club',
+                    'group', 'community', 'friends', 'dating'
+                ]
+            }
+            
+            # Initialize category vector
+            category_vector = {group: 0.0 for group in category_groups.keys()}
+            
+            # Process each category
+            for category in categories:
+                category = category.lower()
+                # Find matching groups
+                for group, keywords in category_groups.items():
+                    if any(keyword in category for keyword in keywords):
+                        category_vector[group] += 1.0
+            
+            # Normalize vector
+            total = sum(category_vector.values())
+            if total > 0:
+                category_vector = {k: v/total for k, v in category_vector.items()}
+            
+            return json.dumps(category_vector)
+            
+        except Exception as e:
+            logger.error(f"Error processing categories: {str(e)}")
+            return json.dumps({})
+    
+    def _extract_topics(self, description: str) -> str:
+        """Extract topics from event description using keyword analysis.
+        
+        Args:
+            description: Event description text
+            
+        Returns:
+            JSON string representing topic vector
+        """
+        try:
+            if not description:
+                return json.dumps({})
+            
+            # Define topic keywords and their weights
+            topic_keywords = {
+                'technology': {
+                    'keywords': ['technology', 'tech', 'digital', 'software', 'app',
+                               'programming', 'coding', 'developer', 'data', 'ai',
+                               'machine learning', 'blockchain', 'cyber', 'cloud'],
+                    'weight': 1.0
+                },
+                'business': {
+                    'keywords': ['business', 'entrepreneur', 'startup', 'company',
+                               'industry', 'market', 'finance', 'investment',
+                               'strategy', 'management', 'leadership'],
+                    'weight': 1.0
+                },
+                'creative': {
+                    'keywords': ['art', 'design', 'creative', 'music', 'film',
+                               'photography', 'fashion', 'writing', 'performance',
+                               'dance', 'theater', 'craft'],
+                    'weight': 1.0
+                },
+                'education': {
+                    'keywords': ['education', 'learning', 'training', 'workshop',
+                               'course', 'class', 'seminar', 'lecture', 'study',
+                               'research', 'academic'],
+                    'weight': 1.0
+                },
+                'social': {
+                    'keywords': ['social', 'community', 'networking', 'meetup',
+                               'gathering', 'party', 'celebration', 'festival',
+                               'entertainment', 'fun'],
+                    'weight': 0.8
+                },
+                'health': {
+                    'keywords': ['health', 'wellness', 'fitness', 'exercise',
+                               'meditation', 'yoga', 'mindfulness', 'nutrition',
+                               'medical', 'healthcare'],
+                    'weight': 1.0
+                },
+                'professional': {
+                    'keywords': ['professional', 'career', 'job', 'work',
+                               'industry', 'corporate', 'business', 'networking',
+                               'skills', 'development'],
+                    'weight': 1.0
+                },
+                'culture': {
+                    'keywords': ['culture', 'art', 'history', 'heritage',
+                               'tradition', 'language', 'food', 'cuisine',
+                               'festival', 'celebration'],
+                    'weight': 0.9
+                }
+            }
+            
+            # Initialize topic scores
+            topic_scores = {topic: 0.0 for topic in topic_keywords.keys()}
+            
+            # Preprocess description
+            description = description.lower()
+            
+            # Score each topic based on keyword matches
+            for topic, data in topic_keywords.items():
+                keywords = data['keywords']
+                weight = data['weight']
+                
+                # Count keyword matches
+                matches = sum(1 for keyword in keywords if keyword in description)
+                # Apply weight and normalize by number of keywords
+                topic_scores[topic] = (matches * weight) / len(keywords)
+            
+            # Normalize scores
+            total_score = sum(topic_scores.values())
+            if total_score > 0:
+                topic_scores = {k: v/total_score for k, v in topic_scores.items()}
+            
+            # Filter out topics with very low scores
+            topic_scores = {k: v for k, v in topic_scores.items() if v > 0.1}
+            
+            return json.dumps(topic_scores)
+            
+        except Exception as e:
+            logger.error(f"Error extracting topics: {str(e)}")
+            return json.dumps({})
+    
+    def _normalize_price(self, price: float) -> float:
+        """Normalize price value to a 0-1 scale.
+        
+        Args:
+            price: Raw price value
+            
+        Returns:
+            Normalized price value between 0 and 1
+        """
+        try:
+            if price < 0:
+                return 0.0
+            
+            # Use log scale for price normalization to handle wide ranges
+            # Assume most events are between $0 and $1000
+            # Use log(price + 1) to handle free events (price = 0)
+            normalized = np.log1p(price) / np.log1p(1000)
+            
+            # Clip to ensure value is between 0 and 1
+            return float(min(1.0, max(0.0, normalized)))
+            
+        except Exception as e:
+            logger.error(f"Error normalizing price: {str(e)}")
+            return 0.0
+    
+    def _normalize_capacity(self, capacity: int) -> float:
+        """Normalize capacity value to a 0-1 scale.
+        
+        Args:
+            capacity: Raw capacity value
+            
+        Returns:
+            Normalized capacity value between 0 and 1
+        """
+        try:
+            if capacity < 0:
+                return 0.0
+            
+            # Use log scale for capacity normalization
+            # Assume typical events range from 10 to 1000 people
+            # Smaller events (< 10) will be normalized to lower values
+            # Larger events (> 1000) will be normalized to values close to 1
+            normalized = np.log1p(capacity) / np.log1p(1000)
+            
+            # Clip to ensure value is between 0 and 1
+            return float(min(1.0, max(0.0, normalized)))
+            
+        except Exception as e:
+            logger.error(f"Error normalizing capacity: {str(e)}")
+            return 0.0
+    
+    def _extract_time_of_day(self, start_time: str) -> int:
+        """Extract hour of day from start time.
+        
+        Args:
+            start_time: ISO format timestamp string
+            
+        Returns:
+            Hour of day (0-23)
+        """
+        try:
+            if not start_time:
+                return 0
+            
+            # Parse ISO format timestamp
+            dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+            return dt.hour
+            
+        except Exception as e:
+            logger.error(f"Error extracting time of day: {str(e)}")
+            return 0
+    
+    def _extract_day_of_week(self, start_time: str) -> int:
+        """Extract day of week from start time.
+        
+        Args:
+            start_time: ISO format timestamp string
+            
+        Returns:
+            Day of week (0=Monday, 6=Sunday)
+        """
+        try:
+            if not start_time:
+                return 0
+            
+            # Parse ISO format timestamp
+            dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+            # Convert to 0-6 range where 0 is Monday
+            return dt.weekday()
+            
+        except Exception as e:
+            logger.error(f"Error extracting day of week: {str(e)}")
+            return 0
+    
+    def _calculate_duration(self, start_time: str, end_time: str) -> float:
+        """Calculate event duration in hours.
+        
+        Args:
+            start_time: ISO format start timestamp
+            end_time: ISO format end timestamp
+            
+        Returns:
+            Duration in hours (float)
+        """
+        try:
+            if not start_time or not end_time:
+                return 0.0
+            
+            # Parse ISO format timestamps
+            start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+            end_dt = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+            
+            # Calculate duration in hours
+            duration = (end_dt - start_dt).total_seconds() / 3600
+            
+            # Handle invalid durations (negative or extremely long)
+            if duration < 0 or duration > 168:  # Max 1 week
+                return 0.0
+                
+            return float(duration)
+            
+        except Exception as e:
+            logger.error(f"Error calculating duration: {str(e)}")
+            return 0.0
+    
+    def _calculate_attendance_score(self, event_data: Dict) -> float:
+        """Calculate attendance score based on event metrics.
+        
+        Args:
+            event_data: Dictionary containing event data with structure:
+                {
+                    'capacity': int,
+                    'registered': int,
+                    'waitlist': int,
+                    'previous_events': [
+                        {
+                            'capacity': int,
+                            'attendance': int,
+                            'satisfaction_score': float
+                        },
+                        ...
+                    ]
+                }
+                
+        Returns:
+            Float between 0 and 1 representing attendance score
+        """
+        try:
+            if not event_data:
+                return 0.0
+            
+            scores = {}
+            
+            # 1. Current Registration Rate
+            capacity = event_data.get('capacity', 0)
+            registered = event_data.get('registered', 0)
+            waitlist = event_data.get('waitlist', 0)
+            
+            if capacity > 0:
+                # Calculate registration rate
+                reg_rate = registered / capacity
+                # Add bonus for waitlist
+                waitlist_bonus = min(0.2, waitlist / capacity)  # Cap bonus at 0.2
+                scores['registration'] = min(1.0, reg_rate + waitlist_bonus)
+            else:
+                scores['registration'] = 0.0
+            
+            # 2. Historical Attendance Rate
+            previous_events = event_data.get('previous_events', [])
+            if previous_events:
+                attendance_rates = []
+                for event in previous_events:
+                    event_capacity = event.get('capacity', 0)
+                    attendance = event.get('attendance', 0)
+                    if event_capacity > 0:
+                        attendance_rates.append(attendance / event_capacity)
+                
+                if attendance_rates:
+                    # Use exponential moving average to weight recent events more heavily
+                    weights = np.exp(-np.arange(len(attendance_rates)) / 2)  # decay factor of 2
+                    weights /= weights.sum()
+                    scores['historical'] = float(np.average(attendance_rates, weights=weights))
+                else:
+                    scores['historical'] = 0.0
+            else:
+                scores['historical'] = 0.0
+            
+            # 3. Satisfaction Impact
+            if previous_events:
+                satisfaction_scores = [
+                    event.get('satisfaction_score', 0.0)
+                    for event in previous_events
+                    if 'satisfaction_score' in event
+                ]
+                
+                if satisfaction_scores:
+                    # Use most recent satisfaction scores (last 3)
+                    recent_satisfaction = np.mean(satisfaction_scores[-3:])
+                    scores['satisfaction'] = float(recent_satisfaction)
+                else:
+                    scores['satisfaction'] = 0.0
+            else:
+                scores['satisfaction'] = 0.0
+            
+            # Calculate final score with weights
+            weights = {
+                'registration': 0.5,    # Current registration is most important
+                'historical': 0.3,      # Historical attendance provides context
+                'satisfaction': 0.2     # Satisfaction affects likelihood of attendance
+            }
+            
+            final_score = sum(
+                weights[metric] * score
+                for metric, score in scores.items()
+            )
+            
+            return float(final_score)
+            
+        except Exception as e:
+            logger.error(f"Error calculating attendance score: {str(e)}")
+            return 0.0
+    
+    def _calculate_social_score(self, event_data: Dict) -> float:
+        """Calculate social engagement score for the event.
+        
+        Args:
+            event_data: Dictionary containing event data with structure:
+                {
+                    'social_metrics': {
+                        'shares': int,
+                        'likes': int,
+                        'comments': int,
+                        'rsvps': int
+                    },
+                    'group_data': {
+                        'member_count': int,
+                        'active_members': int,
+                        'avg_event_engagement': float
+                    },
+                    'viral_coefficients': {
+                        'share_rate': float,
+                        'conversion_rate': float
+                    }
+                }
+                
+        Returns:
+            Float between 0 and 1 representing social engagement score
+        """
+        try:
+            if not event_data:
+                return 0.0
+            
+            scores = {}
+            
+            # 1. Social Media Engagement
+            social_metrics = event_data.get('social_metrics', {})
+            if social_metrics:
+                # Calculate engagement rate
+                total_engagement = (
+                    social_metrics.get('shares', 0) * 2.0 +  # Shares weighted more heavily
+                    social_metrics.get('likes', 0) * 1.0 +
+                    social_metrics.get('comments', 0) * 1.5 +  # Comments show more engagement
+                    social_metrics.get('rsvps', 0) * 1.8      # RSVPs show strong intent
+                )
+                
+                # Normalize based on typical engagement rates
+                # Assume 100 total weighted engagements is high
+                scores['social_engagement'] = min(1.0, total_engagement / 100)
+            else:
+                scores['social_engagement'] = 0.0
+            
+            # 2. Group Activity Score
+            group_data = event_data.get('group_data', {})
+            if group_data:
+                member_count = group_data.get('member_count', 0)
+                active_members = group_data.get('active_members', 0)
+                avg_engagement = group_data.get('avg_event_engagement', 0.0)
+                
+                if member_count > 0:
+                    # Calculate active member ratio
+                    activity_ratio = active_members / member_count
+                    # Combine with average engagement
+                    scores['group_activity'] = (activity_ratio + float(avg_engagement)) / 2
+                else:
+                    scores['group_activity'] = 0.0
+            else:
+                scores['group_activity'] = 0.0
+            
+            # 3. Viral Potential
+            viral_data = event_data.get('viral_coefficients', {})
+            if viral_data:
+                share_rate = viral_data.get('share_rate', 0.0)
+                conversion_rate = viral_data.get('conversion_rate', 0.0)
+                
+                # Calculate viral coefficient (K-factor)
+                viral_coefficient = share_rate * conversion_rate
+                # Normalize: assume viral coefficient > 1 is very good
+                scores['viral'] = min(1.0, viral_coefficient)
+            else:
+                scores['viral'] = 0.0
+            
+            # Calculate final score with weights
+            weights = {
+                'social_engagement': 0.4,  # Direct engagement is most important
+                'group_activity': 0.3,     # Group dynamics affect social potential
+                'viral': 0.3               # Viral potential indicates broader appeal
+            }
+            
+            final_score = sum(
+                weights[metric] * score
+                for metric, score in scores.items()
+            )
+            
+            return float(final_score)
+            
+        except Exception as e:
+            logger.error(f"Error calculating social score: {str(e)}")
+            return 0.0
+    
+    def _calculate_organizer_rating(self, event_history: List) -> float:
+        """Calculate organizer rating based on event history.
+        
+        Args:
+            event_history: List of historical events with structure:
+                [
+                    {
+                        'attendance_rate': float,
+                        'satisfaction_score': float,
+                        'review_score': float,
+                        'timestamp': str,
+                        'cancellation': bool
+                    },
+                    ...
+                ]
+                
+        Returns:
+            Float between 0 and 1 representing organizer rating
         """
         try:
             if not event_history:
                 return 0.0
-                
-            # Define weights for different factors
+            
+            scores = {}
+            
+            # Sort events by timestamp
+            sorted_events = sorted(
+                event_history,
+                key=lambda x: datetime.fromisoformat(x['timestamp'].replace('Z', '+00:00'))
+            )
+            
+            # 1. Attendance Rate Trend
+            attendance_rates = [
+                event.get('attendance_rate', 0.0)
+                for event in sorted_events
+            ]
+            
+            if attendance_rates:
+                # Calculate weighted average with more weight on recent events
+                weights = np.exp(np.linspace(-1, 0, len(attendance_rates)))
+                weights /= weights.sum()
+                scores['attendance'] = float(np.average(attendance_rates, weights=weights))
+            else:
+                scores['attendance'] = 0.0
+            
+            # 2. Satisfaction Trend
+            satisfaction_scores = [
+                event.get('satisfaction_score', 0.0)
+                for event in sorted_events
+            ]
+            
+            if satisfaction_scores:
+                # Use exponential moving average
+                weights = np.exp(np.linspace(-1, 0, len(satisfaction_scores)))
+                weights /= weights.sum()
+                scores['satisfaction'] = float(np.average(satisfaction_scores, weights=weights))
+            else:
+                scores['satisfaction'] = 0.0
+            
+            # 3. Review Score Average
+            review_scores = [
+                event.get('review_score', 0.0)
+                for event in sorted_events
+                if 'review_score' in event
+            ]
+            
+            if review_scores:
+                # Weight recent reviews more heavily
+                weights = np.exp(np.linspace(-1, 0, len(review_scores)))
+                weights /= weights.sum()
+                scores['reviews'] = float(np.average(review_scores, weights=weights))
+            else:
+                scores['reviews'] = 0.0
+            
+            # 4. Reliability Score (based on cancellations)
+            total_events = len(sorted_events)
+            if total_events > 0:
+                cancellations = sum(1 for event in sorted_events if event.get('cancellation', False))
+                reliability = 1.0 - (cancellations / total_events)
+                scores['reliability'] = float(reliability)
+            else:
+                scores['reliability'] = 0.0
+            
+            # Calculate final score with weights
             weights = {
-                'event_rating': 0.25,
-                'event_scale': 0.20,
-                'complexity': 0.15,
-                'success_metrics': 0.25,
-                'experience': 0.15
+                'attendance': 0.25,     # Consistent attendance shows good organization
+                'satisfaction': 0.25,   # Participant satisfaction is key
+                'reviews': 0.25,        # Direct feedback from attendees
+                'reliability': 0.25     # Reliability in hosting events
             }
             
-            # Initialize score components
-            scores = {
-                'event_rating': 0.0,
-                'event_scale': 0.0,
-                'complexity': 0.0,
-                'success_metrics': 0.0,
-                'experience': 0.0
-            }
+            final_score = sum(
+                weights[metric] * score
+                for metric, score in scores.items()
+            )
             
-            # Calculate experience level based on number of events
-            num_events = len(event_history)
-            scores['experience'] = min(1.0, np.log1p(num_events) / np.log1p(20))  # Caps at 20 events
-            
-            # Process each event
-            for event in event_history:
-                # Event rating score (weighted by number of reviews)
-                rating = event.get('rating', 0.0)
-                reviews = event.get('reviews', 0)
-                rating_weight = min(1.0, np.log1p(reviews) / np.log1p(50))  # Caps at 50 reviews
-                scores['event_rating'] += (rating / 5.0) * rating_weight
-                
-                # Event scale score based on attendees and team size
-                attendees = event.get('attendees', 0)
-                team_size = event.get('team_size', 1)
-                scale_score = min(1.0, np.log1p(attendees) / np.log1p(1000))  # Caps at 1000 attendees
-                scale_score *= min(1.0, np.log1p(team_size) / np.log1p(10))   # Caps at team of 10
-                scores['event_scale'] += scale_score
-                
-                # Complexity score
-                complexity_levels = {'low': 0.3, 'medium': 0.6, 'high': 1.0}
-                complexity = event.get('complexity', 'low').lower()
-                scores['complexity'] += complexity_levels.get(complexity, 0.3)
-                
-                # Success metrics score
-                metrics = event.get('success_metrics', {})
-                if metrics:
-                    metric_scores = [
-                        metrics.get('attendance_rate', 0.0),
-                        metrics.get('satisfaction', 0.0),
-                        metrics.get('budget_adherence', 0.0),
-                        metrics.get('timeline_adherence', 0.0)
-                    ]
-                    scores['success_metrics'] += sum(m for m in metric_scores if m > 0) / len(metric_scores)
-            
-            # Normalize accumulated scores by number of events
-            for key in ['event_rating', 'event_scale', 'complexity', 'success_metrics']:
-                scores[key] = scores[key] / num_events if num_events > 0 else 0.0
-            
-            # Calculate weighted final score
-            final_score = sum(scores[k] * weights[k] for k in weights)
-            
-            # Apply bonus for consistent high performance
-            if num_events >= 5 and scores['event_rating'] > 0.8 and scores['success_metrics'] > 0.8:
-                final_score = min(1.0, final_score * 1.2)
-            
-            return final_score
+            return float(final_score)
             
         except Exception as e:
             logger.error(f"Error calculating organizer rating: {str(e)}")

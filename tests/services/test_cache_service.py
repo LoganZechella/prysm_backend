@@ -1,7 +1,8 @@
 import pytest
 from datetime import datetime, timedelta
+from unittest.mock import patch, MagicMock
+from app.models.event import EventModel
 from app.services.cache_service import CacheService, CacheEntry, CacheConfig
-from app.models.event import Event
 from app.models.preferences import UserPreferences
 import time
 
@@ -32,12 +33,18 @@ def test_preferences():
 def test_events():
     """Create test events."""
     return [
-        Event(
-            id=f"event-{i}",
+        EventModel(
+            id=i,
+            platform_id=f"event-{i}",
             title=f"Test Event {i}",
             description=f"Description {i}",
-            start_time=datetime.utcnow() + timedelta(days=i),
-            categories=["music"] if i % 2 == 0 else ["sports"]
+            start_datetime=datetime.utcnow() + timedelta(days=i),
+            categories=["music"] if i % 2 == 0 else ["sports"],
+            platform="test",
+            url=f"http://test.com/event{i}",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            last_scraped_at=datetime.utcnow()
         )
         for i in range(5)
     ]

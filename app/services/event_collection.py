@@ -6,7 +6,9 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import logging
 import asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from app.scrapers.eventbrite_scrapfly import EventbriteScrapflyScraper
 from app.scrapers.facebook_scrapfly import FacebookScrapflyScraper
@@ -14,6 +16,7 @@ from app.scrapers.meetup_scrapfly import MeetupScrapflyScraper
 from app.services.event_pipeline import EventPipeline
 from app.utils.retry_handler import RetryError
 from app.models.event import EventModel
+from app.db.session import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -51,41 +54,46 @@ class EventCollectionService:
         total_events = 0
         
         try:
-            # Collect from Eventbrite
-            eventbrite_events = await self._collect_from_source(
-                self.eventbrite,
-                "eventbrite",
-                locations,
-                date_range
-            )
-            total_events += len(eventbrite_events)
-            
-            # Collect from Facebook
-            facebook_events = await self._collect_from_source(
-                self.facebook,
-                "facebook",
-                locations,
-                date_range
-            )
-            total_events += len(facebook_events)
-            
-            # Collect from Meetup
-            meetup_events = await self._collect_from_source(
-                self.meetup,
-                "meetup",
-                locations,
-                date_range
-            )
-            total_events += len(meetup_events)
-            
-            return total_events
-            
+            async with AsyncSessionLocal() as db:
+                # Collect from Eventbrite
+                eventbrite_events = await self._collect_from_source(
+                    db,
+                    self.eventbrite,
+                    "eventbrite",
+                    locations,
+                    date_range
+                )
+                total_events += len(eventbrite_events)
+                
+                # Collect from Facebook
+                facebook_events = await self._collect_from_source(
+                    db,
+                    self.facebook,
+                    "facebook",
+                    locations,
+                    date_range
+                )
+                total_events += len(facebook_events)
+                
+                # Collect from Meetup
+                meetup_events = await self._collect_from_source(
+                    db,
+                    self.meetup,
+                    "meetup",
+                    locations,
+                    date_range
+                )
+                total_events += len(meetup_events)
+                
+                return total_events
+                
         except Exception as e:
             logger.error(f"Error collecting events: {str(e)}")
             return total_events
     
     async def _collect_from_source(
         self,
+        db: AsyncSession,
         scraper: Any,
         source: str,
         locations: List[Dict[str, Any]],
@@ -105,8 +113,9 @@ class EventCollectionService:
                     
                     if events:
                         # Process and store events
-                        processed_ids = await self.pipeline.process_events(events, source)
-                        logger.info(f"Processed {len(processed_ids)} events from {source}")
+                        for event in events:
+                            await self.store_event(db, event, source)
+                        logger.info(f"Processed {len(events)} events from {source}")
                         
                         all_events.extend(events)
                         
@@ -163,45 +172,76 @@ class EventCollectionService:
         """Stop the collection task"""
         self.running = False 
 
-    async def store_event(self, event: Dict[str, Any], source: str) -> Optional[EventModel]:
+    async def store_event(self, db: AsyncSession, event: Dict[str, Any], source: str) -> Optional[EventModel]:
         """Store an event in the database"""
-        event_id = event.get("id")
+        # Try different possible locations for event ID
+        event_id = event.get("event_id") or event.get("id") or event.get("platform_id")
+        if not event_id and event.get("url"):
+            # Extract from URL as fallback
+            event_id = event["url"].split("-")[-1]
+            
         if not event_id:
             logger.error("Event ID is missing")
             return None
 
-        # Check if event already exists
-        existing_event = await self.db.query(EventModel).filter(
-            EventModel.source_id == event_id,
-            EventModel.source == source
-        ).first()
+        try:
+            # Check if event already exists
+            result = await db.execute(
+                select(EventModel).filter_by(
+                    platform_id=event_id,
+                    platform=source
+                )
+            )
+            existing_event = result.scalar_one_or_none()
 
-        if existing_event:
-            logger.debug(f"Event {event_id} already exists in database")
-            return None
+            if existing_event:
+                logger.debug(f"Event {event_id} already exists in database")
+                return None
 
-        # Create new event
-        event_model = EventModel(
-            source_id=event_id,
-            source=source,
-            title=event.get("title"),
-            description=event.get("description"),
-            start_time=event.get("start_time"),
-            end_time=event.get("end_time"),
-            url=event.get("url"),
-            venue_name=event.get("venue_name"),
-            venue_address=event.get("venue_address"),
-            venue_city=event.get("venue_city"),
-            venue_state=event.get("venue_state"),
-            venue_zip=event.get("venue_zip"),
-            venue_country=event.get("venue_country"),
-            venue_lat=event.get("venue_lat"),
-            venue_lon=event.get("venue_lon"),
-            is_online=event.get("is_online", False),
-            image_url=event.get("image_url")
-        )
+            # Extract venue and organizer info
+            venue = event.get("venue", {})
+            if isinstance(venue, str):
+                venue = {"name": venue}
+            organizer = event.get("organizer", {})
+            if isinstance(organizer, str):
+                organizer = {"name": organizer}
 
-        self.db.add(event_model)
-        await self.db.commit()
-        await self.db.refresh(event_model)
-        return event_model 
+            # Create new event
+            event_model = EventModel(
+                platform_id=event_id,
+                platform=source,
+                title=event.get("title"),
+                description=event.get("description"),
+                start_datetime=event.get("start_time") or event.get("start_datetime"),
+                end_datetime=event.get("end_time") or event.get("end_datetime"),
+                url=event.get("url"),
+                
+                # Venue information
+                venue_name=venue.get("name"),
+                venue_lat=float(venue.get("lat", 0) or venue.get("latitude", 0)),
+                venue_lon=float(venue.get("lon", 0) or venue.get("longitude", 0)),
+                venue_city=venue.get("city"),
+                venue_state=venue.get("state"),
+                venue_country=venue.get("country"),
+                
+                # Organizer information
+                organizer_id=organizer.get("id"),
+                organizer_name=organizer.get("name"),
+                
+                # Event metadata
+                is_online=event.get("is_online", False),
+                rsvp_count=int(event.get("rsvp_count", 0)),
+                price_info=event.get("price_info") or event.get("prices", []),
+                categories=event.get("categories", []),
+                image_url=event.get("image_url")
+            )
+
+            db.add(event_model)
+            await db.commit()
+            await db.refresh(event_model)
+            return event_model
+            
+        except Exception as e:
+            logger.error(f"Error storing event {event_id}: {str(e)}")
+            await db.rollback()
+            return None 

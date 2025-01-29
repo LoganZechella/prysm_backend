@@ -16,25 +16,71 @@ class CategoryExtractor:
             logger.error(f"Error loading spaCy model: {str(e)}")
             self.nlp = None
             
-        # Define main category hierarchies
+        # Define main category hierarchies with subcategories
         self.category_hierarchy = {
-            "music": ["concert", "festival", "live music", "dj", "band", "orchestra"],
-            "sports": ["game", "match", "tournament", "race", "competition"],
-            "arts": ["exhibition", "gallery", "museum", "theater", "dance", "performance"],
-            "food": ["dining", "tasting", "culinary", "restaurant", "food festival"],
-            "education": ["workshop", "seminar", "conference", "lecture", "class"],
-            "networking": ["meetup", "social", "networking", "mixer", "business"],
-            "entertainment": ["show", "comedy", "movie", "film", "party"],
-            "outdoor": ["hiking", "camping", "adventure", "nature", "outdoor"],
-            "technology": ["tech", "hackathon", "coding", "digital", "software"],
-            "wellness": ["fitness", "yoga", "meditation", "health", "wellness"]
+            "music": {
+                "keywords": ["music", "concert", "festival", "live music", "dj", "band", "orchestra"],
+                "subcategories": {
+                    "jazz": ["jazz", "blues", "swing", "soul", "r&b"],
+                    "rock": ["rock", "metal", "punk", "alternative"],
+                    "classical": ["classical", "orchestra", "symphony", "chamber"],
+                    "electronic": ["electronic", "edm", "techno", "house", "dubstep"]
+                }
+            },
+            "sports": {
+                "keywords": ["sports", "game", "match", "tournament", "race", "competition"],
+                "subcategories": {
+                    "team_sports": ["football", "basketball", "baseball", "soccer", "hockey"],
+                    "individual_sports": ["tennis", "golf", "athletics", "swimming"]
+                }
+            },
+            "arts": {
+                "keywords": ["art", "exhibition", "gallery", "museum", "theater", "dance", "performance"],
+                "subcategories": {
+                    "visual_arts": ["painting", "sculpture", "photography", "drawing", "digital art"],
+                    "performing_arts": ["theater", "dance", "ballet", "opera", "drama"]
+                }
+            },
+            "food": {
+                "keywords": ["dining", "tasting", "culinary", "restaurant", "food festival", "cuisine"],
+                "subcategories": {}
+            },
+            "education": {
+                "keywords": ["workshop", "seminar", "conference", "lecture", "class", "training"],
+                "subcategories": {}
+            },
+            "networking": {
+                "keywords": ["meetup", "social", "networking", "mixer", "business", "professional"],
+                "subcategories": {}
+            },
+            "entertainment": {
+                "keywords": ["show", "comedy", "movie", "film", "party", "fun"],
+                "subcategories": {}
+            },
+            "outdoor": {
+                "keywords": ["hiking", "camping", "adventure", "nature", "outdoor", "wilderness"],
+                "subcategories": {}
+            },
+            "technology": {
+                "keywords": ["tech", "hackathon", "coding", "digital", "software", "programming"],
+                "subcategories": {}
+            },
+            "wellness": {
+                "keywords": ["fitness", "yoga", "meditation", "health", "wellness", "mindfulness"],
+                "subcategories": {}
+            }
         }
         
         # Create reverse mapping for faster lookups
         self.keyword_to_category = {}
-        for category, keywords in self.category_hierarchy.items():
-            for keyword in keywords:
-                self.keyword_to_category[keyword] = category
+        for category, data in self.category_hierarchy.items():
+            # Add main category keywords
+            for keyword in data["keywords"]:
+                self.keyword_to_category[keyword.lower()] = category
+            # Add subcategory keywords
+            for subcategory, keywords in data["subcategories"].items():
+                for keyword in keywords:
+                    self.keyword_to_category[keyword.lower()] = subcategory
                 
     def extract_categories(self, event_data: Dict[str, Any]) -> List[str]:
         """
@@ -63,19 +109,24 @@ class CategoryExtractor:
             # Clean and normalize text
             text = self._preprocess_text(text)
             
+            if not text.strip():
+                return []
+                
             # Extract categories using different methods
             categories.update(self._extract_from_keywords(text))
             categories.update(self._extract_from_nlp(text))
             
             # If no categories found, try to infer from context
             if not categories:
-                categories.add(self._infer_default_category(text))
+                inferred = self._infer_default_category(text)
+                if inferred:  # Only add if not empty string
+                    categories.add(inferred)
                 
-            return list(categories)
+            return list(categories) if categories else []
             
         except Exception as e:
             logger.error(f"Error extracting categories: {str(e)}")
-            return ["uncategorized"]
+            return []
             
     def _preprocess_text(self, text: str) -> str:
         """Clean and normalize text for processing."""
@@ -85,7 +136,7 @@ class CategoryExtractor:
         # Convert to lowercase
         text = text.lower()
         
-        # Remove special characters
+        # Remove special characters but keep spaces between words
         text = re.sub(r'[^\w\s]', ' ', text)
         
         # Remove extra whitespace
@@ -96,10 +147,36 @@ class CategoryExtractor:
     def _extract_from_keywords(self, text: str) -> set:
         """Extract categories based on keyword matching."""
         categories = set()
+        words = text.split()
         
-        for keyword, category in self.keyword_to_category.items():
-            if keyword in text:
-                categories.add(category)
+        # Check single words
+        for word in words:
+            word = word.lower()
+            if word in self.keyword_to_category:
+                cat = self.keyword_to_category[word]
+                categories.add(cat)
+                # Add parent category if this is a subcategory
+                for main_cat, data in self.category_hierarchy.items():
+                    if cat in data["subcategories"]:
+                        categories.add(main_cat)
+                        # Add the keyword itself as a category if it's a subcategory keyword
+                        for subcat, keywords in data["subcategories"].items():
+                            if word in [k.lower() for k in keywords]:
+                                categories.add(word)
+        
+        # Check multi-word phrases
+        for category, data in self.category_hierarchy.items():
+            # Check main category keywords
+            for keyword in data["keywords"]:
+                if keyword.lower() in text.lower():
+                    categories.add(category)
+            # Check subcategory keywords
+            for subcategory, keywords in data["subcategories"].items():
+                for keyword in keywords:
+                    if keyword.lower() in text.lower():
+                        categories.add(subcategory)
+                        categories.add(category)  # Add parent category too
+                        categories.add(keyword.lower())  # Add the keyword itself as a category
                 
         return categories
         
@@ -120,18 +197,33 @@ class CategoryExtractor:
             
             # Check entities and noun phrases against keywords
             for item in entities + noun_phrases:
-                for keyword, category in self.keyword_to_category.items():
-                    if keyword in item:
+                # Check single words
+                for word in item.split():
+                    word = word.lower()
+                    if word in self.keyword_to_category:
+                        cat = self.keyword_to_category[word]
+                        categories.add(cat)
+                        # Add parent category if this is a subcategory
+                        for main_cat, data in self.category_hierarchy.items():
+                            if cat in data["subcategories"]:
+                                categories.add(main_cat)
+                                # Add the keyword itself as a category if it's a subcategory keyword
+                                for subcat, keywords in data["subcategories"].items():
+                                    if word in [k.lower() for k in keywords]:
+                                        categories.add(word)
+                
+                # Check multi-word phrases
+                for category, data in self.category_hierarchy.items():
+                    # Check main category keywords
+                    if any(keyword.lower() in item.lower() for keyword in data["keywords"]):
                         categories.add(category)
-                        
-            # Use TextBlob for additional analysis
-            blob = TextBlob(text)
-            
-            # Check noun phrases from TextBlob
-            for phrase in str(blob.noun_phrases).split():
-                for keyword, category in self.keyword_to_category.items():
-                    if keyword in phrase:
-                        categories.add(category)
+                    # Check subcategory keywords
+                    for subcategory, keywords in data["subcategories"].items():
+                        for keyword in keywords:
+                            if keyword.lower() in item.lower():
+                                categories.add(subcategory)
+                                categories.add(category)  # Add parent category too
+                                categories.add(keyword.lower())  # Add the keyword itself as a category
                         
         except Exception as e:
             logger.error(f"Error in NLP processing: {str(e)}")
@@ -154,56 +246,19 @@ class CategoryExtractor:
         elif words & social_words:
             return "networking"
             
-        return "uncategorized"
+        return ""  # Return empty string instead of "uncategorized"
+
+# Module-level extractor instance
+_category_extractor = CategoryExtractor()
+
+def extract_categories_from_text(text: str) -> List[str]:
+    """
+    Extract categories from text using NLP and rule-based approaches.
+    
+    Args:
+        text: Text to analyze for categories
         
-    def get_category_confidence(self, category: str, text: str) -> float:
-        """
-        Calculate confidence score for a category assignment.
-        
-        Args:
-            category: Category to check
-            text: Text to analyze
-            
-        Returns:
-            Confidence score between 0 and 1
-        """
-        try:
-            if not text or not category:
-                return 0.0
-                
-            text = self._preprocess_text(text)
-            
-            # Get keywords for the category
-            keywords = self.category_hierarchy.get(category, [])
-            if not keywords:
-                return 0.0
-                
-            # Count keyword matches
-            matches = sum(1 for keyword in keywords if keyword in text)
-            
-            # Calculate base confidence from keyword matches
-            base_confidence = min(1.0, matches / len(keywords))
-            
-            # Adjust confidence based on text analysis
-            if self.nlp:
-                doc = self.nlp(text)
-                
-                # Check for relevant entities
-                entity_boost = 0.1 * sum(1 for ent in doc.ents if any(
-                    keyword in ent.text.lower() for keyword in keywords
-                ))
-                
-                # Use TextBlob for sentiment analysis
-                blob = TextBlob(text)
-                sentiment_tuple = blob.sentiment
-                sentiment_score = float(sentiment_tuple[0])  # Access polarity directly from tuple
-                sentiment_factor = 1.0 + (0.1 * abs(sentiment_score))  # Boost for strong sentiment
-                
-                final_confidence = min(1.0, base_confidence * sentiment_factor + entity_boost)
-                return final_confidence
-                
-            return base_confidence
-            
-        except Exception as e:
-            logger.error(f"Error calculating category confidence: {str(e)}")
-            return 0.0 
+    Returns:
+        List of extracted categories
+    """
+    return _category_extractor.extract_categories({"description": text}) 

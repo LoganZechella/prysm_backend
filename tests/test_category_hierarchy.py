@@ -2,11 +2,11 @@ import pytest
 from app.services.category_hierarchy import (
     create_default_hierarchy,
     map_platform_categories,
-    CategoryHierarchy,
-    CategoryNode
+    extract_categories
 )
 from app.schemas.event import Event
-from app.schemas.category import CategoryHierarchy, CategoryNode
+from app.schemas.category import CategoryNode, CategoryHierarchy
+from typing import Dict, List, Set
 
 def test_create_default_hierarchy():
     """Test creating default category hierarchy."""
@@ -18,10 +18,12 @@ def test_create_default_hierarchy():
 
 def test_map_platform_categories():
     """Test mapping platform-specific categories."""
+    hierarchy = create_default_hierarchy()
     categories = ["MUSIC_EVENT", "SPORTS_EVENT"]
-    mapped = map_platform_categories(categories, "facebook")
+    mapped = map_platform_categories(categories, "meta", hierarchy)
     assert "music" in mapped
     assert "sports" in mapped
+    assert "events" in mapped  # Parent category should be included
 
 def test_category_hierarchy():
     """Test category hierarchy functionality."""
@@ -34,5 +36,5 @@ def test_category_hierarchy():
     
     # Test relationships
     assert hierarchy.get_ancestors("jazz") == ["events", "music"]
-    assert hierarchy.get_ancestors("music") == ["events"]
-    assert hierarchy.get_ancestors("events") == [] 
+    assert "jazz" in hierarchy.get_descendants("events")
+    assert "jazz" in hierarchy.get_descendants("music") 

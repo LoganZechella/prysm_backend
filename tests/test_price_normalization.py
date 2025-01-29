@@ -3,9 +3,11 @@ from datetime import datetime
 from app.services.price_normalization import (
     normalize_price,
     calculate_price_tier,
-    enrich_event_prices
+    enrich_event_prices,
+    PriceNormalizer
 )
-from app.schemas.event import Event, Location, PriceInfo, SourceInfo, EventAttributes, EventMetadata
+from app.schemas.event import EventBase, Location, PriceInfo, SourceInfo, EventAttributes, EventMetadata
+from app.models.event import EventModel as Event
 
 def test_normalize_price():
     """Test price normalization."""
@@ -33,7 +35,7 @@ def test_calculate_price_tier():
 def test_enrich_event_prices():
     """Test event price enrichment."""
     now = datetime.now()
-    event = Event(
+    event = EventBase(
         event_id="1",
         title="Test Event",
         description="A test event",

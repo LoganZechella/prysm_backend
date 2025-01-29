@@ -19,12 +19,6 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables created successfully")
         
-        # Start event collection task
-        logger.info("Starting event collection task...")
-        event_task = EventCollectionTask()
-        await event_task.start()
-        logger.info("Event collection task started successfully")
-        
     except Exception as e:
         logger.error(f"Error during startup: {e}")
         raise
@@ -33,10 +27,6 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     try:
-        logger.info("Stopping event collection task...")
-        await event_task.stop()
-        logger.info("Event collection task stopped successfully")
-        
         logger.info("Closing database connections...")
         await engine.dispose()
         logger.info("Database connections closed successfully")

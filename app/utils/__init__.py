@@ -1,4 +1,5 @@
-"""Utility functions and classes"""
-from .rate_limiter import RateLimiter
+"""Utility package initialization."""
 
-__all__ = ['RateLimiter']
+from .decorators import circuit_breaker, with_retry
+
+__all__ = ['circuit_breaker', 'with_retry']

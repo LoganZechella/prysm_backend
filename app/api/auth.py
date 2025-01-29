@@ -15,6 +15,12 @@ from supertokens_python.recipe.session.asyncio import revoke_session, create_new
 import httpx
 import traceback
 import jwt
+from app.services.auth_service import (
+    get_auth_status,
+    get_spotify_auth_url,
+    process_spotify_callback,
+    refresh_spotify_token
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -45,38 +51,15 @@ async def verify_session(request: Request):
 
 @router.get("/status")
 async def auth_status_handler(
-    request: Request,
     user_id: str = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get the current authentication status."""
     try:
         logger.debug(f"Checking auth status for user: {user_id}")
-        logger.debug(f"Request headers: {request.headers}")
-        
-        # Check each service's connection status
-        spotify_token = db.query(OAuthToken).filter_by(
-            user_id=user_id,
-            provider="spotify"
-        ).first()
-        
-        google_token = db.query(OAuthToken).filter_by(
-            user_id=user_id,
-            provider="google"
-        ).first()
-        
-        linkedin_token = db.query(OAuthToken).filter_by(
-            user_id=user_id,
-            provider="linkedin"
-        ).first()
-        
-        status = AuthStatus(
-            spotify=bool(spotify_token),
-            google=bool(google_token),
-            linkedin=bool(linkedin_token)
-        )
+        status = await get_auth_status(user_id, db)
         logger.debug(f"Auth status for user {user_id}: {status}")
-        return status
+        return AuthStatus(**status)
             
     except Exception as e:
         logger.error(f"Error checking auth status: {str(e)}", exc_info=True)
@@ -86,24 +69,18 @@ async def auth_status_handler(
         )
 
 @router.get("/init-session")
-async def init_session_handler(request: Request):
+async def init_session_handler():
     """Initialize a session for the user if one doesn't exist."""
     try:
-        # Try to get existing session
-        try:
-            user_id = await get_current_user(request)
-            logger.debug(f"Found existing session for user: {user_id}")
-            # Even for existing sessions, return a fresh token
-            token = create_access_token(user_id)
-            logger.debug(f"Created fresh token for existing user: {token}")
-            return {"status": "success", "message": "Session exists", "token": token}
-        except Exception as e:
-            logger.debug(f"No existing session found, creating new one. Error: {str(e)}")
-            # Create a new session with a temporary user ID
-            temp_user_id = f"temp_{datetime.utcnow().timestamp()}"
-            token = create_access_token(temp_user_id)
-            logger.debug(f"Created new token for temp user: {token}")
-            return {"status": "success", "message": "Session created", "token": token}
+        # Create a new session with a temporary user ID
+        temp_user_id = f"temp_{datetime.utcnow().timestamp()}"
+        token = create_access_token(temp_user_id)
+        logger.debug(f"Created new token for temp user: {token}")
+        return {
+            "status": "success",
+            "message": "Session created",
+            "token": token
+        }
             
     except Exception as e:
         logger.error(f"Error initializing session: {str(e)}")
@@ -113,50 +90,13 @@ async def init_session_handler(request: Request):
         )
 
 @router.get("/spotify")
-async def spotify_auth_handler(request: Request):
+async def spotify_auth_handler(user_id: str = Depends(get_current_user)):
     """Handle Spotify OAuth authorization."""
     try:
-        client_id = os.getenv("SPOTIFY_CLIENT_ID")
-        redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8000/api/v1/auth/spotify/callback")
-        scope = " ".join([
-            'user-read-private',
-            'user-read-email',
-            'user-top-read',
-            'user-read-recently-played',
-            'playlist-read-private',
-            'playlist-read-collaborative',
-            'user-library-read',
-            'user-follow-read',
-            'user-follow-modify'
-        ])
-        
-        if not client_id:
-            raise HTTPException(
-                status_code=500,
-                detail="Spotify client ID not configured"
-            )
-
-        # Get user_id from Authorization header
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            raise HTTPException(
-                status_code=401,
-                detail="No valid token provided"
-            )
-
-        token = auth_header.split(" ")[1]
-        
-        # Construct Spotify authorization URL
-        params = {
-            "client_id": client_id,
-            "response_type": "code",
-            "redirect_uri": redirect_uri,
-            "scope": scope,
-            "show_dialog": True,
-            "state": token  # Pass the JWT token as state
-        }
-        
-        auth_url = f"https://accounts.spotify.com/authorize?{urlencode(params)}"
+        auth_url = get_spotify_auth_url()
+        # Add state parameter with user ID
+        state = create_access_token(user_id)
+        auth_url = f"{auth_url}&state={state}"
         return {"auth_url": auth_url}
         
     except Exception as e:
@@ -168,165 +108,60 @@ async def spotify_auth_handler(request: Request):
 
 @router.get("/spotify/callback")
 async def spotify_callback_handler(
-    request: Request,
-    code: str, 
+    code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """Handle Spotify OAuth callback."""
-    if error:
-        logger.error(f"Spotify authorization error: {error}")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Spotify authorization error: {error}"
-        )
-        
     try:
-        # Exchange the authorization code for access token
-        client_id = os.getenv("SPOTIFY_CLIENT_ID")
-        client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-        redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8000/api/v1/auth/spotify/callback")
-        
-        if not client_id or not client_secret:
-            logger.error("Spotify credentials not configured")
+        # Get user_id from state parameter
+        if not state:
+            logger.error("No state parameter found")
             raise HTTPException(
-                status_code=500,
-                detail="Spotify credentials not configured"
+                status_code=400,
+                detail="No state parameter found"
             )
-            
-        # Create Spotify OAuth client
-        auth = spotipy.oauth2.SpotifyOAuth(
-            client_id=client_id,
-            client_secret=client_secret,
-            redirect_uri=redirect_uri,
-            scope=" ".join([
-                'user-read-private',
-                'user-read-email',
-                'user-top-read',
-                'user-read-recently-played',
-                'playlist-read-private',
-                'playlist-read-collaborative',
-                'user-library-read',
-                'user-follow-read',
-                'user-follow-modify'
-            ])
-        )
-        
-        # Exchange code for token
-        token_info = auth.get_access_token(code)
-        
-        if not token_info:
-            logger.error("Failed to exchange code for token")
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to exchange code for token"
-            )
-        
-        try:
-            # Get user_id from state parameter
-            if not state:
-                logger.error("No state parameter found")
-                raise HTTPException(
-                    status_code=400,
-                    detail="No state parameter found"
-                )
 
-            try:
-                payload = jwt.decode(state, SECRET_KEY_BYTES, algorithms=[ALGORITHM])
-                user_id = payload.get("sub")
-                if not user_id:
-                    raise jwt.InvalidTokenError("No user_id in token")
-            except jwt.InvalidTokenError as e:
-                logger.error(f"Invalid state token: {str(e)}")
-                raise HTTPException(
-                    status_code=401,
-                    detail="Invalid state token"
-                )
-            
-            # Store token in database
-            oauth_token = OAuthToken(
-                user_id=user_id,
-                provider="spotify",
-                access_token=token_info["access_token"],
-                refresh_token=token_info.get("refresh_token"),
-                expires_at=datetime.utcnow() + timedelta(seconds=token_info.get("expires_in", 3600)),
-                client_id=client_id,
-                client_secret=client_secret,
-                redirect_uri=redirect_uri,
-                scope=token_info.get("scope", "")
-            )
-            
-            # Update or insert token
-            existing_token = db.query(OAuthToken).filter_by(
-                user_id=user_id,
-                provider="spotify"
-            ).first()
-            
-            if existing_token:
-                for key, value in oauth_token.__dict__.items():
-                    if not key.startswith('_'):
-                        setattr(existing_token, key, value)
-            else:
-                db.add(oauth_token)
-                
-            db.commit()
-            logger.info(f"Successfully stored Spotify token for user {user_id}")
-            
-            return {
-                "status": "success",
-                "message": "Successfully authenticated with Spotify",
-                "user_id": user_id
-            }
-            
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Error storing token: {str(e)}")
+        try:
+            payload = jwt.decode(state, SECRET_KEY_BYTES, algorithms=[ALGORITHM])
+            user_id = payload.get("sub")
+            if not user_id:
+                raise jwt.InvalidTokenError("No user_id in token")
+        except jwt.InvalidTokenError as e:
+            logger.error(f"Invalid state token: {str(e)}")
             raise HTTPException(
-                status_code=500,
-                detail="Failed to store token"
+                status_code=401,
+                detail="Invalid state token"
             )
+            
+        # Process callback
+        redirect_url = await process_spotify_callback(user_id, code, error, db)
+        return RedirectResponse(url=redirect_url)
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error handling Spotify callback: {str(e)}", exc_info=True)
+        logger.error(f"Error processing Spotify callback: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail="Failed to handle Spotify callback"
+            detail="Failed to process Spotify callback"
         )
 
 @router.post("/logout")
-async def logout_handler(request: Request):
-    """Handle user logout by revoking the session."""
+async def logout_handler(user_id: str = Depends(get_current_user)):
+    """Log out the current user."""
     try:
-        logger.debug("Starting logout process")
-        try:
-            session = await verify_session(request)
-            session_handle = session.get_handle()
-            logger.debug(f"Found active session with handle: {session_handle}")
-            
-            await revoke_session(session_handle)
-            logger.debug("Successfully revoked session")
-            
-            return {"status": "success", "message": "Logged out successfully"}
-            
-        except Exception as session_error:
-            logger.error(f"Session error during logout: {str(session_error)}")
-            logger.error(f"Session error traceback: {traceback.format_exc()}")
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid or expired session"
-            )
+        # Since we're using JWT, we don't need to do anything server-side
+        # The client should discard the token
+        return {"status": "success", "message": "Logged out successfully"}
             
     except Exception as e:
         logger.error(f"Error during logout: {str(e)}")
-        logger.error(f"Logout error traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to logout: {str(e)}"
-        ) 
+            detail="Failed to log out"
+        )
 
 @router.get("/google")
 async def google_auth_handler(request: Request):

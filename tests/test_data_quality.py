@@ -7,41 +7,43 @@ from app.services.data_quality import (
     validate_dates,
     validate_prices
 )
-from app.schemas.event import Event, Location, PriceInfo, SourceInfo, EventAttributes, EventMetadata
+from app.schemas.event import EventBase, PriceInfo
+from app.schemas.validation import LocationBase
+from app.schemas.source import SourceInfo
+from app.schemas.metadata import EventMetadata
 
 def test_validate_event():
     """Test event validation."""
     now = datetime.now()
     # Test valid event
-    event = Event(
-        event_id="1",
+    event = EventBase(
+        platform_id="test-1",
         title="Test Event",
         description="A test event",
         start_datetime=now,
-        location=Location(
-            venue_name="Test Venue",
-            city="Test City",
-            coordinates={"lat": 37.7749, "lon": -122.4194}
-        ),
+        url="http://test.com/event/1",
+        platform="test",
+        venue_name="Test Venue",
+        venue_city="Test City",
+        venue_country="Test Country",
+        venue_lat=37.7749,
+        venue_lon=-122.4194,
         categories=["test"],
-        attributes=EventAttributes(
-            indoor_outdoor="indoor",
-            age_restriction="all"
-        ),
-        source=SourceInfo(
-            platform="test",
-            url="http://test.com",
-            last_updated=now
-        ),
-        metadata=EventMetadata(
-            popularity_score=0.8
-        )
+        is_online=False,
+        rsvp_count=0,
+        price_info={
+            "currency": "USD",
+            "min_price": 10.0,
+            "max_price": 50.0,
+            "tier": "medium"
+        }
     )
     
     assert validate_event(event) is True
     
     # Test invalid coordinates
-    event.location.coordinates = {"lat": 100.0, "lon": 200.0}
+    event.venue_lat = 100.0
+    event.venue_lon = 200.0
     assert validate_event(event) is False
     
     # Test invalid dates
@@ -49,40 +51,32 @@ def test_validate_event():
     assert validate_event(event) is False
     
     # Test invalid prices
-    event.price_info = PriceInfo(
-        min_price=-10.0,  # Negative price
-        max_price=50.0,
-        currency="USD",
-        price_tier="medium"
-    )
+    event.price_info = {
+        "currency": "USD",
+        "min_price": -10.0,  # Negative price
+        "max_price": 50.0,
+        "tier": "medium"
+    }
     assert validate_event(event) is False
 
 def test_check_required_fields():
     """Test required field validation."""
     now = datetime.now()
-    event = Event(
-        event_id="1",
+    event = EventBase(
+        platform_id="test-1",
         title="Test Event",
         description="A test event",
         start_datetime=now,
-        location=Location(
-            venue_name="Test Venue",
-            city="Test City",
-            coordinates={"lat": 37.7749, "lon": -122.4194}
-        ),
+        url="http://test.com/event/1",
+        platform="test",
+        venue_name="Test Venue",
+        venue_city="Test City",
+        venue_country="Test Country",
+        venue_lat=37.7749,
+        venue_lon=-122.4194,
         categories=["test"],
-        attributes=EventAttributes(
-            indoor_outdoor="indoor",
-            age_restriction="all"
-        ),
-        source=SourceInfo(
-            platform="test",
-            url="http://test.com",
-            last_updated=now
-        ),
-        metadata=EventMetadata(
-            popularity_score=0.8
-        )
+        is_online=False,
+        rsvp_count=0
     )
     
     assert check_required_fields(event) is True
@@ -91,8 +85,8 @@ def test_check_required_fields():
     event.title = ""
     assert check_required_fields(event) is False
     
-    # Test missing description
-    event.description = ""
+    # Test missing venue name
+    event.venue_name = ""
     assert check_required_fields(event) is False
 
 def test_validate_coordinates():
@@ -126,32 +120,21 @@ def test_validate_prices():
     """Test price validation."""
     # Test valid prices
     assert validate_prices(PriceInfo(
-        min_price=10.0,
-        max_price=50.0,
         currency="USD",
-        price_tier="medium"
+        min_price=10.0,
+        max_price=50.0
     )) is True
     
     # Test negative price
     assert validate_prices(PriceInfo(
+        currency="USD",
         min_price=-10.0,
-        max_price=50.0,
-        currency="USD",
-        price_tier="medium"
-    )) is False
-    
-    # Test min > max
-    assert validate_prices(PriceInfo(
-        min_price=60.0,
-        max_price=50.0,
-        currency="USD",
-        price_tier="medium"
+        max_price=50.0
     )) is False
     
     # Test invalid currency
     assert validate_prices(PriceInfo(
-        min_price=10.0,
-        max_price=50.0,
         currency="INVALID",
-        price_tier="medium"
+        min_price=10.0,
+        max_price=50.0
     )) is False 

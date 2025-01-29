@@ -3,7 +3,8 @@ from fastapi.testclient import TestClient
 from datetime import datetime, timedelta
 import json
 from app.main import app
-from app.utils.schema import Event, Location, PriceInfo, EventAttributes, SourceInfo, EventMetadata
+from app.models.event import EventModel
+from app.schemas.event import Location, PriceInfo, EventAttributes, SourceInfo, EventMetadata
 from app.utils.storage import StorageManager
 from app.models.preferences import UserPreferences as DBUserPreferences
 from unittest.mock import patch, MagicMock
@@ -20,36 +21,28 @@ def mock_storage():
     with patch('app.routes.recommendations.storage_manager') as mock:
         # Create test events
         events = [
-            Event(
-                event_id=f"test-event-{i}",
+            EventModel(
+                id=i,
+                platform_id=f"test-event-{i}",
                 title=f"Test Event {i}",
                 description=f"Description for test event {i}",
                 start_datetime=datetime.now() + timedelta(days=i),
                 end_datetime=datetime.now() + timedelta(days=i, hours=2),  # Event duration of 2 hours
-                location=Location(
-                    venue_name=f"Venue {i}",
-                    city="San Francisco",
-                    coordinates={"lat": 37.7749, "lng": -122.4194}
-                ),
+                venue_name=f"Venue {i}",
+                venue_city="San Francisco",
+                venue_lat=37.7749,
+                venue_lon=-122.4194,
                 categories=["Music", "Technology"] if i % 2 == 0 else ["Sports"],
-                price_info=PriceInfo(
-                    min_price=50.0 * i,
-                    max_price=100.0 * i,
-                    price_tier="medium" if i < 3 else "premium"
-                ),
-                attributes=EventAttributes(
-                    indoor_outdoor="indoor",
-                    age_restriction="all",
-                    accessibility_features=["wheelchair"]
-                ),
-                source=SourceInfo(
-                    platform="test",
-                    url=f"http://test.com/event{i}",
-                    last_updated=datetime.now()
-                ),
-                metadata=EventMetadata(
-                    popularity_score=0.8 - (i * 0.1)
-                )
+                price_info={
+                    "min_price": 50.0 * i,
+                    "max_price": 100.0 * i,
+                    "price_tier": "medium" if i < 3 else "premium"
+                },
+                platform="test",
+                url=f"http://test.com/event{i}",
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+                last_scraped_at=datetime.now()
             )
             for i in range(5)
         ]
