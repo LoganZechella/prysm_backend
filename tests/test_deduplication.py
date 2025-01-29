@@ -1,6 +1,6 @@
 import pytest
 from datetime import datetime, timedelta
-from app.utils.schema import Event, Location, PriceInfo, EventAttributes, SourceInfo
+from app.schemas.event import EventBase, Location, PriceInfo, EventAttributes, SourceInfo
 from app.utils.deduplication import (
     calculate_title_similarity,
     calculate_time_proximity,
@@ -19,7 +19,7 @@ def sample_events():
     events = []
     
     # Original event
-    events.append(Event(
+    events.append(EventBase(
         event_id="1",
         title="Summer Music Festival 2024",
         description="Annual summer music festival featuring local and international artists",
@@ -49,7 +49,7 @@ def sample_events():
     ))
     
     # Duplicate event with slightly different details
-    events.append(Event(
+    events.append(EventBase(
         event_id="2",
         title="Summer Music Fest '24",  # Slightly different title
         description="The biggest summer music festival in NYC with amazing artists",  # Different description
@@ -79,7 +79,7 @@ def sample_events():
     ))
     
     # Clearly different event
-    events.append(Event(
+    events.append(EventBase(
         event_id="3",
         title="Winter Art Exhibition",
         description="Showcase of local artists' winter-themed works",

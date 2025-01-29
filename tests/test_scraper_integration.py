@@ -3,8 +3,8 @@ from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 from sqlalchemy.orm import Session
 from app.services.event_collection import EventCollectionService
-from app.models.event import Event
-from app.db.session import SessionLocal
+from app.models.event import EventModel
+from app.database.session import SessionLocal
 import logging
 import os
 
@@ -15,7 +15,7 @@ def cleanup_db():
     """Clean up the database before each test"""
     db = SessionLocal()
     try:
-        db.query(Event).delete()
+        db.query(EventModel).delete()
         db.commit()
     finally:
         db.close()
@@ -135,7 +135,7 @@ async def test_event_collection_integration(db: Session, mock_scrapfly_key, mock
 
         # Verify events from each platform
         for platform in ['eventbrite', 'meetup', 'facebook']:
-            event = db.query(Event).filter(Event.source == platform).first()
+            event = db.query(EventModel).filter(EventModel.source == platform).first()
             assert event is not None, f"No event found for {platform}"
             assert event.title == 'Test Event'
             assert event.source == platform
@@ -191,7 +191,7 @@ async def test_event_collection_error_handling(db: Session, mock_scrapfly_key):
         assert new_events_count == 0
         
         # Verify no events were stored
-        events = db.query(Event).all()
+        events = db.query(EventModel).all()
         assert len(events) == 0
     finally:
         for p in patches:
@@ -252,9 +252,9 @@ async def test_event_data_mapping(db: Session, mock_scrapfly_key):
         assert new_events_count == 1, "Expected 1 event to be stored"
 
         # Retrieve and verify the stored event
-        stored_event = db.query(Event).filter(
-            Event.source == 'eventbrite',
-            Event.source_id == 'test-123'
+        stored_event = db.query(EventModel).filter(
+            EventModel.source == 'eventbrite',
+            EventModel.source_id == 'test-123'
         ).first()
 
         assert stored_event is not None, "Event was not stored"

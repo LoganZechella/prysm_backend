@@ -148,21 +148,37 @@ class MeetupScrapflyScraper(ScrapflyBaseScraper):
         self.logger.info(f"Successfully extracted {len(events)} events")
         return events
 
-    async def scrape_events(self, location: str = "Louisville", limit: int = 10) -> List[EventModel]:
-        """Scrape events from Meetup."""
+    async def scrape_events(
+        self,
+        location: Dict[str, Any],
+        date_range: Dict[str, datetime],
+        categories: Optional[List[str]] = None,
+        page: int = 1
+    ) -> List[Dict[str, Any]]:
+        """
+        Scrape events from Meetup.
+        
+        Args:
+            location: Dictionary with city, state, country, latitude, longitude
+            date_range: Dictionary with start and end datetime
+            categories: Optional list of category strings
+            page: Page number for pagination
+            
+        Returns:
+            List of event dictionaries
+        """
         try:
-            url = self._build_events_url(location=location, limit=limit)
+            # Build GraphQL query URL and parameters
+            url, query = self._build_search_url(location, date_range, categories, page)
             self.logger.info(f"Scraping Meetup events from URL: {url}")
             
             config = ScrapeConfig(
                 url=url,
-                render_js=True,
-                asp=True,
-                country='us',
-                method='GET',
+                method='POST',
+                body=json.dumps(query),
                 headers={
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
                     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
             )
@@ -171,8 +187,17 @@ class MeetupScrapflyScraper(ScrapflyBaseScraper):
             
             if not result or not result.content:
                 raise ScrapflyError("Empty response from Scrapfly")
+                
+            # Parse response
+            response_data = json.loads(result.content)
+            if 'data' not in response_data or 'result' not in response_data['data']:
+                raise ScrapflyError("Invalid response format")
+                
+            # Extract events from GraphQL response
+            events = self._parse_graphql_events(response_data['data']['result'])
+            self.logger.info(f"Successfully extracted {len(events)} events")
             
-            return await self.extract_events(result.content)
+            return events
             
         except Exception as e:
             self.logger.error(f"Error scraping events: {str(e)}")
@@ -189,7 +214,7 @@ class MeetupScrapflyScraper(ScrapflyBaseScraper):
         base_url = "https://www.meetup.com/gql"
         
         # Format location string
-        location_str = f"us--{location['state'].lower()}--{location['city'].replace(' ', '%20')}"
+        location_str = f"{location['country'].lower()}--{location['state'].lower()}--{location['city'].lower().replace(' ', '-')}"
         
         # Build GraphQL query
         query = {
@@ -198,15 +223,35 @@ class MeetupScrapflyScraper(ScrapflyBaseScraper):
                 "first": 20,
                 "after": f"{(page - 1) * 20}" if page > 1 else None,
                 "location": location_str,
-                "source": "EVENTS"
+                "source": "EVENTS",
+                "startDate": date_range['start'].isoformat(),
+                "endDate": date_range['end'].isoformat(),
+                "categories": self._map_categories(categories) if categories else None
             },
             "query": """
-                query SearchEvents($first: Int!, $after: String, $location: String!, $source: String) {
-                    result: searchEvents(input: {first: $first, after: $after, location: $location, source: $source}) {
+                query SearchEvents(
+                    $first: Int!,
+                    $after: String,
+                    $location: String!,
+                    $source: String,
+                    $startDate: String,
+                    $endDate: String,
+                    $categories: [String]
+                ) {
+                    result: searchEvents(
+                        input: {
+                            first: $first,
+                            after: $after,
+                            location: $location,
+                            source: $source,
+                            startDate: $startDate,
+                            endDate: $endDate,
+                            categories: $categories
+                        }
+                    ) {
                         pageInfo {
                             hasNextPage
                             endCursor
-                            __typename
                         }
                         totalCount
                         edges {
@@ -221,7 +266,6 @@ class MeetupScrapflyScraper(ScrapflyBaseScraper):
                                 maxTickets
                                 rsvps {
                                     totalCount
-                                    __typename
                                 }
                                 venue {
                                     id
@@ -231,133 +275,103 @@ class MeetupScrapflyScraper(ScrapflyBaseScraper):
                                     city
                                     state
                                     country
-                                    __typename
                                 }
                                 group {
                                     id
                                     name
                                     urlname
                                     timezone
-                                    isPrivate
-                                    isNewGroup
-                                    __typename
                                 }
                                 featuredEventPhoto {
                                     baseUrl
                                     highResUrl
-                                    id
-                                    __typename
                                 }
-                                __typename
                             }
-                            metadata {
-                                recId
-                                recSource
-                                __typename
-                            }
-                            __typename
                         }
-                        __typename
                     }
                 }
             """
         }
         
         return base_url, query
-    
+
     def _map_categories(self, categories: List[str]) -> List[str]:
-        """Map generic categories to Meetup category IDs"""
-        category_mapping = {
-            "tech": "292",
-            "business": "2",
-            "career": "2",
-            "education": "8",
-            "fitness": "9",
-            "health": "14",
-            "sports": "32",
-            "outdoors": "23",
-            "photography": "27",
-            "arts": "1",
-            "culture": "4",
-            "music": "21",
-            "social": "31",
-            "dance": "5",
-            "food": "10",
-            "language": "16",
-            "pets": "26",
-            "hobbies": "15"
+        """Map our category names to Meetup category IDs"""
+        category_map = {
+            "tech": ["tech"],
+            "business": ["career", "business"],
+            "social": ["community", "hobbies"],
+            "education": ["education", "learning"],
+            "arts": ["arts", "culture"],
+            "music": ["music", "performing-arts"],
+            "outdoors": ["outdoors", "adventure"],
+            "sports": ["sports", "fitness"],
+            "food": ["food", "drink"],
+            "games": ["games", "fun"],
+            "language": ["language", "culture"],
+            "pets": ["pets", "animals"],
+            "photography": ["photography", "arts"],
+            "writing": ["writing", "book-clubs"],
+            "fashion": ["fashion", "style"],
+            "film": ["film", "movies"],
+            "dance": ["dance", "movement"],
+            "family": ["family", "parents"],
+            "health": ["health", "wellness"],
+            "science": ["science", "technology"]
         }
         
-        return [category_mapping[cat.lower()]
-                for cat in categories
-                if cat.lower() in category_mapping]
-    
+        mapped_categories = []
+        for category in categories:
+            if category.lower() in category_map:
+                mapped_categories.extend(category_map[category.lower()])
+        return list(set(mapped_categories))  # Remove duplicates
+
     def _parse_graphql_events(self, search_results: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Parse events from GraphQL response"""
         events = []
-        self.logger.debug(f"[meetup] Parsing GraphQL events from search results")
         
-        try:
-            for edge in search_results.get('edges', []):
-                node = edge.get('node')
-                if not node:
-                    continue
+        for edge in search_results.get('edges', []):
+            node = edge.get('node', {})
+            if not node:
+                continue
                 
-                try:
-                    venue = node.get('venue', {})
-                    group = node.get('group', {})
-                    photo = node.get('featuredEventPhoto', {})
-                    
-                    # Parse datetime (Meetup uses ISO format)
-                    try:
-                        start_time = datetime.fromisoformat(node.get('dateTime').replace('Z', '+00:00'))
-                    except (ValueError, TypeError, AttributeError) as e:
-                        self.logger.warning(f"[meetup] Failed to parse event date: {str(e)}")
-                        continue
-                    
-                    event = {
-                        'title': node.get('title', ''),
-                        'description': node.get('description', ''),
-                        'start_time': start_time,
-                        'event_type': node.get('eventType', ''),
-                        'location': {
-                            'venue_name': venue.get('name', ''),
-                            'city': venue.get('city', ''),
-                            'state': venue.get('state', ''),
-                            'country': venue.get('country', ''),
-                            'latitude': venue.get('lat', 0),
-                            'longitude': venue.get('lon', 0)
-                        },
-                        'source': self.platform,
-                        'event_id': node.get('id', ''),
-                        'url': node.get('eventUrl', ''),
-                        'image_url': photo.get('highResUrl', ''),
-                        'is_online': node.get('isOnline', False),
-                        'attendance_count': node.get('rsvps', {}).get('totalCount', 0),
-                        'max_tickets': node.get('maxTickets'),
-                        'group': {
-                            'id': group.get('id', ''),
-                            'name': group.get('name', ''),
-                            'url': f"https://www.meetup.com/{group.get('urlname', '')}",
-                            'timezone': group.get('timezone', ''),
-                            'is_private': group.get('isPrivate', False),
-                            'is_new': group.get('isNewGroup', False)
-                        },
-                        'metadata': {
-                            'rec_id': edge.get('metadata', {}).get('recId', ''),
-                            'rec_source': edge.get('metadata', {}).get('recSource', '')
-                        }
-                    }
-                    
-                    events.append(event)
-                    self.logger.debug(f"[meetup] Successfully parsed event: {event['title']}")
-                    
-                except Exception as e:
-                    self.logger.warning(f"[meetup] Error parsing event: {str(e)}")
-                    continue
-                    
-        except Exception as e:
-            self.logger.error(f"[meetup] Error parsing GraphQL events: {str(e)}")
+            # Skip online events
+            if node.get('isOnline', False):
+                continue
+                
+            # Get venue info
+            venue = node.get('venue', {})
             
-        self.logger.info(f"[meetup] Successfully parsed {len(events)} events")
+            # Get group info
+            group = node.get('group', {})
+            
+            # Get photo info
+            photo = node.get('featuredEventPhoto', {})
+            
+            event = {
+                'id': node.get('id'),
+                'title': node.get('title'),
+                'description': node.get('description', ''),
+                'start_time': node.get('dateTime'),
+                'url': node.get('eventUrl', ''),
+                'venue': {
+                    'name': venue.get('name', ''),
+                    'lat': venue.get('lat'),
+                    'lon': venue.get('lon'),
+                    'city': venue.get('city', ''),
+                    'state': venue.get('state', ''),
+                    'country': venue.get('country', '')
+                },
+                'organizer': {
+                    'id': group.get('id', ''),
+                    'name': group.get('name', '')
+                },
+                'is_online': node.get('isOnline', False),
+                'rsvp_count': node.get('rsvps', {}).get('totalCount', 0),
+                'image_url': photo.get('highResUrl') or photo.get('baseUrl', ''),
+                'categories': []  # We'll need to map these from the group's categories
+            }
+            
+            events.append(event)
+            
         return events 

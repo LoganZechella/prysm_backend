@@ -14,7 +14,7 @@ from utils.event_collection_utils import (
 from utils.data_quality_utils import (
     validate_spotify_data,
     validate_trends_data,
-    validate_event_data,
+    validate_event,
     validate_processed_data,
     check_data_freshness,
     check_data_completeness
@@ -134,7 +134,7 @@ with DAG(
         
         event_quality = PythonOperator(
             task_id='check_event_quality',
-            python_callable=validate_event_data
+            python_callable=validate_event
         )
         
         trends_quality = PythonOperator(

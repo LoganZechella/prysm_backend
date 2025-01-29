@@ -7,12 +7,17 @@ from datetime import datetime
 import logging
 import asyncio
 from functools import partial
+from sqlalchemy.orm import Session
 
 from app.storage.manager import StorageManager
 from app.storage.s3 import S3Storage
 from app.storage.dynamodb import DynamoDBStorage
-from app.schemas.event import Event
+from app.schemas.event import EventBase
 from app.utils.retry_handler import RetryError
+from app.database.models import EventModel
+from app.services.data_quality import validate_event
+from app.utils.deduplication import find_duplicate_events
+from app.services.nlp_service import NLPService
 
 logger = logging.getLogger(__name__)
 

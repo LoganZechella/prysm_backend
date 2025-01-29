@@ -1,10 +1,11 @@
 import logging
-from typing import List, Tuple, Dict, Set
+from typing import List, Tuple, Dict, Set, Any, Optional
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from app.schemas.event import Event
 from app.utils.location_services import calculate_distance
+from app.services.location_recommendations import LocationService
 
 logger = logging.getLogger(__name__)
 
@@ -18,17 +19,145 @@ class DuplicateScore:
     description_similarity: float  # 0-1 score for description match
     combined_score: float  # Weighted average of all scores
 
-def calculate_title_similarity(title1: str, title2: str) -> float:
-    """
-    Calculate similarity between two event titles using sequence matching.
-    Returns a score between 0 and 1.
-    """
-    # Clean and normalize titles
-    t1 = title1.lower().strip()
-    t2 = title2.lower().strip()
+class DeduplicationService:
+    """Service for deduplicating events."""
     
-    # Use SequenceMatcher for fuzzy string matching
-    return SequenceMatcher(None, t1, t2).ratio()
+    def __init__(self):
+        """Initialize deduplication service."""
+        self.location_service = LocationService()
+        
+    def deduplicate_events(
+        self,
+        events: List[Dict[str, Any]],
+        similarity_threshold: float = 0.8,
+        distance_threshold: float = 0.1  # 100 meters
+    ) -> List[Dict[str, Any]]:
+        """
+        Remove duplicate events based on title and location similarity.
+        
+        Args:
+            events: List of events to deduplicate
+            similarity_threshold: Minimum title similarity to consider events duplicates
+            distance_threshold: Maximum distance in km to consider same location
+            
+        Returns:
+            Deduplicated list of events
+        """
+        try:
+            unique_events = []
+            
+            for event in events:
+                is_duplicate = False
+                
+                for unique_event in unique_events:
+                    # Check title similarity
+                    if self._calculate_title_similarity(
+                        event.get("title", ""),
+                        unique_event.get("title", "")
+                    ) >= similarity_threshold:
+                        # If titles are similar, check location
+                        if self._are_locations_same(
+                            event,
+                            unique_event,
+                            distance_threshold
+                        ):
+                            # Keep event with more complete information
+                            if self._is_more_complete(event, unique_event):
+                                unique_events.remove(unique_event)
+                                unique_events.append(event)
+                            is_duplicate = True
+                            break
+                
+                if not is_duplicate:
+                    unique_events.append(event)
+            
+            return unique_events
+            
+        except Exception as e:
+            logger.error(f"Error deduplicating events: {str(e)}")
+            return events
+            
+    def _calculate_title_similarity(self, title1: str, title2: str) -> float:
+        """Calculate similarity score between two event titles."""
+        if not title1 or not title2:
+            return 0.0
+            
+        # Remove common prefixes/suffixes that don't affect similarity
+        prefixes = ["the ", "a ", "an "]
+        suffixes = [" event", " show", " party"]
+        
+        title1 = title1.lower()
+        title2 = title2.lower()
+        
+        for prefix in prefixes:
+            title1 = title1[len(prefix):] if title1.startswith(prefix) else title1
+            title2 = title2[len(prefix):] if title2.startswith(prefix) else title2
+            
+        for suffix in suffixes:
+            title1 = title1[:-len(suffix)] if title1.endswith(suffix) else title1
+            title2 = title2[:-len(suffix)] if title2.endswith(suffix) else title2
+            
+        return SequenceMatcher(None, title1, title2).ratio()
+        
+    def _are_locations_same(
+        self,
+        event1: Dict[str, Any],
+        event2: Dict[str, Any],
+        distance_threshold: float
+    ) -> bool:
+        """Check if two events are at the same location."""
+        try:
+            # Get coordinates for both events
+            coords1 = {
+                "lat": event1.get("venue_lat") or event1.get("lat"),
+                "lon": event1.get("venue_lon") or event1.get("lng") or event1.get("lon")
+            }
+            
+            coords2 = {
+                "lat": event2.get("venue_lat") or event2.get("lat"),
+                "lon": event2.get("venue_lon") or event2.get("lng") or event2.get("lon")
+            }
+            
+            # If both events have coordinates, check distance
+            if all(coords1.values()) and all(coords2.values()):
+                distance = self.location_service.calculate_distance(coords1, coords2)
+                return distance <= distance_threshold
+                
+            # If no coordinates, check venue names and cities
+            return (
+                event1.get("venue_name") == event2.get("venue_name") and
+                event1.get("venue_city") == event2.get("venue_city") and
+                event1.get("venue_state") == event2.get("venue_state")
+            )
+            
+        except Exception as e:
+            logger.error(f"Error comparing event locations: {str(e)}")
+            return False
+            
+    def _is_more_complete(self, event1: Dict[str, Any], event2: Dict[str, Any]) -> bool:
+        """Check if event1 has more complete information than event2."""
+        score1 = 0
+        score2 = 0
+        
+        # Fields to check for completeness
+        fields = [
+            "description",
+            "image_url",
+            "price_info",
+            "categories",
+            "organizer_name",
+            "venue_name",
+            "venue_lat",
+            "venue_lon"
+        ]
+        
+        for field in fields:
+            if event1.get(field):
+                score1 += 1
+            if event2.get(field):
+                score2 += 1
+                
+        return score1 > score2
 
 def calculate_time_proximity(time1: datetime, time2: datetime, max_delta: timedelta = timedelta(hours=24)) -> float:
     """

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, JSON, Integer
+from sqlalchemy import Column, String, DateTime, JSON, Integer, UniqueConstraint
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -30,6 +30,11 @@ class OAuthToken(Base):
     # Additional provider-specific data
     provider_user_id = Column(String(255))  # ID from the provider (e.g., Spotify user ID)
     provider_metadata = Column(JSON)  # Additional provider-specific data
+    
+    # Add unique constraint
+    __table_args__ = (
+        UniqueConstraint('user_id', 'provider', name='uq_oauth_tokens_user_provider'),
+    )
 
     def __init__(self, **kwargs):
         """Initialize an OAuth token."""

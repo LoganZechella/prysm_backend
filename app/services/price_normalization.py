@@ -1,158 +1,220 @@
-from typing import Dict, Any, Optional, Union
+"""Price normalization service for event prices."""
+
+from typing import Dict, Any, List, Optional, Union
 import logging
-from decimal import Decimal
 from forex_python.converter import CurrencyRates
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-class PriceNormalizer:
-    def __init__(self):
-        self.currency_converter = CurrencyRates()
-        self.base_currency = "USD"
+# Global currency converter instance
+_currency_converter = CurrencyRates()
+
+def normalize_price(amount: Union[float, int], currency: str = "USD") -> Optional[float]:
+    """
+    Normalize price to USD.
+    
+    Args:
+        amount: Price amount
+        currency: Currency code (default: USD)
         
+    Returns:
+        Normalized price in USD
+    """
+    try:
+        if currency == "USD":
+            return float(amount)
+            
+        rate = _currency_converter.get_rate(currency, "USD")
+        return float(amount) * rate
+        
+    except Exception as e:
+        logger.error(f"Error normalizing price: {str(e)}")
+        return None
+
+def calculate_price_tier(price: float, currency: str = "USD") -> str:
+    """
+    Calculate price tier based on normalized price.
+    
+    Args:
+        price: Price amount
+        currency: Currency code (default: USD)
+        
+    Returns:
+        Price tier string ('free', 'budget', 'medium', 'premium', 'luxury')
+    """
+    try:
+        # Convert to USD if needed
+        if currency != "USD":
+            normalized = normalize_price(price, currency)
+            if normalized is None:
+                return "unknown"
+            price = normalized
+        
+        if price == 0:
+            return "free"
+        elif price <= 20:
+            return "budget"
+        elif price <= 50:
+            return "medium"
+        elif price <= 100:
+            return "premium"
+        else:
+            return "luxury"
+            
+    except Exception as e:
+        logger.error(f"Error calculating price tier: {str(e)}")
+        return "unknown"
+
+def enrich_event_prices(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Enrich event data with normalized prices and price tiers.
+    
+    Args:
+        events: List of event dictionaries
+        
+    Returns:
+        Events with enriched price information
+    """
+    try:
+        enriched_events = []
+        
+        for event in events:
+            # Get original price info
+            price_info = event.get('price_info', {})
+            
+            if price_info:
+                # Get base price and currency
+                amount = price_info.get('amount')
+                currency = price_info.get('currency', 'USD')
+                
+                if amount is not None:
+                    # Add normalized price
+                    normalized = normalize_price(amount, currency)
+                    if normalized is not None:
+                        price_info['normalized_price'] = round(normalized, 2)
+                    
+                    # Add price tier
+                    price_info['tier'] = calculate_price_tier(amount, currency)
+                    
+                    # Update event with enriched price info
+                    event['price_info'] = price_info
+            
+            enriched_events.append(event)
+        
+        return enriched_events
+        
+    except Exception as e:
+        logger.error(f"Error enriching event prices: {str(e)}")
+        return events
+
+class PriceNormalizer:
+    """Service for normalizing price information to a single comparable value."""
+    
+    def __init__(self):
+        """Initialize price normalizer."""
+        self.currency_converter = CurrencyRates()
+        self.default_currency = 'USD'
+        
+        # Price tier thresholds in USD
+        self.price_tiers = {
+            'free': 0,
+            'budget': 20,
+            'medium': 50,
+            'premium': 100,
+            'luxury': float('inf')
+        }
+    
     def normalize_price(self, price_info: Dict[str, Any]) -> Optional[float]:
         """
         Normalize price information to a single comparable value in USD.
         
         Args:
-            price_info: Dictionary containing price information with fields:
-                - amount: float or string
-                - currency: string (ISO code)
-                - type: string (fixed, range, starting_at, etc.)
-                
+            price_info: Dictionary containing price information
+                - amount: Price amount
+                - currency: Currency code (e.g., 'USD', 'EUR')
+                - type: Price type ('fixed', 'range', 'starting_at')
+                - min_price: Minimum price for range
+                - max_price: Maximum price for range
+            
         Returns:
-            Normalized price in USD, or None if price cannot be normalized
+            Normalized price in USD or None if invalid
         """
         try:
             if not price_info:
                 return None
-                
-            # Extract price type and amount
+            
             price_type = price_info.get('type', 'fixed')
-            currency = price_info.get('currency', self.base_currency)
+            currency = price_info.get('currency', self.default_currency)
             
-            # Handle different price types
             if price_type == 'fixed':
-                amount = self._parse_amount(price_info.get('amount'))
+                amount = price_info.get('amount')
+                if amount is None:
+                    return None
+                return self._convert_to_usd(amount, currency)
+                
             elif price_type == 'range':
-                # For ranges, use the average of min and max
-                min_amount = self._parse_amount(price_info.get('min_amount'))
-                max_amount = self._parse_amount(price_info.get('max_amount'))
-                if min_amount is None or max_amount is None:
+                min_price = price_info.get('min_price')
+                max_price = price_info.get('max_price')
+                if min_price is None or max_price is None:
                     return None
-                amount = (min_amount + max_amount) / 2
+                # Use average of range
+                avg_price = (min_price + max_price) / 2
+                return self._convert_to_usd(avg_price, currency)
+                
             elif price_type == 'starting_at':
-                amount = self._parse_amount(price_info.get('amount'))
-            else:
-                logger.warning(f"Unknown price type: {price_type}")
-                return None
-                
-            if amount is None:
-                return None
-                
-            # Convert to base currency if needed
-            if currency != self.base_currency:
-                try:
-                    amount = self.currency_converter.convert(currency, self.base_currency, amount)
-                except Exception as e:
-                    logger.error(f"Currency conversion error: {str(e)}")
+                amount = price_info.get('amount')
+                if amount is None:
                     return None
-                    
-            return float(amount)
+                # Add 20% to starting price as estimate
+                estimated_price = amount * 1.2
+                return self._convert_to_usd(estimated_price, currency)
             
-        except Exception as e:
-            logger.error(f"Price normalization error: {str(e)}")
-            return None
-            
-    def _parse_amount(self, amount: Union[str, float, int, None]) -> Optional[float]:
-        """Parse price amount from various formats."""
-        if amount is None:
-            return None
-            
-        try:
-            # If already a number, just convert to float
-            if isinstance(amount, (int, float)):
-                return float(amount)
-                
-            # If string, handle various formats
-            if isinstance(amount, str):
-                # Remove currency symbols and other non-numeric characters
-                cleaned = ''.join(c for c in amount if c.isdigit() or c in '.,')
-                if not cleaned:
-                    return None
-                    
-                # Handle different decimal separators
-                if ',' in cleaned and '.' in cleaned:
-                    # Assume format like 1,234.56
-                    cleaned = cleaned.replace(',', '')
-                elif ',' in cleaned:
-                    # Assume format like 1234,56
-                    cleaned = cleaned.replace(',', '.')
-                    
-                return float(cleaned)
-                
             return None
             
         except Exception as e:
-            logger.error(f"Amount parsing error: {str(e)}")
+            logger.error(f"Error normalizing price: {str(e)}")
             return None
-            
-    def get_price_range(self, price_info: Dict[str, Any]) -> Dict[str, float]:
+    
+    def calculate_price_tier(self, price_info: Dict[str, Any]) -> str:
         """
-        Get the minimum and maximum prices from price information.
+        Calculate price tier based on normalized price.
         
         Args:
             price_info: Dictionary containing price information
             
         Returns:
-            Dictionary with min and max prices in base currency
+            Price tier string ('free', 'budget', 'medium', 'premium', 'luxury')
         """
         try:
-            if not price_info:
-                return {'min': 0.0, 'max': float('inf')}
-                
-            price_type = price_info.get('type', 'fixed')
-            currency = price_info.get('currency', self.base_currency)
+            normalized_price = self.normalize_price(price_info)
             
-            if price_type == 'fixed':
-                amount = self._parse_amount(price_info.get('amount'))
-                if amount is None:
-                    return {'min': 0.0, 'max': float('inf')}
-                    
-                if currency != self.base_currency:
-                    amount = float(self.currency_converter.convert(currency, self.base_currency, amount))
-                    
-                return {'min': float(amount), 'max': float(amount)}
-                
-            elif price_type == 'range':
-                min_amount = self._parse_amount(price_info.get('min_amount'))
-                max_amount = self._parse_amount(price_info.get('max_amount'))
-                
-                if min_amount is None:
-                    min_amount = 0.0
-                if max_amount is None:
-                    max_amount = float('inf')
-                    
-                if currency != self.base_currency:
-                    if min_amount != 0.0:
-                        min_amount = float(self.currency_converter.convert(currency, self.base_currency, min_amount))
-                    if max_amount != float('inf'):
-                        max_amount = float(self.currency_converter.convert(currency, self.base_currency, max_amount))
-                        
-                return {'min': float(min_amount), 'max': float(max_amount)}
-                
-            elif price_type == 'starting_at':
-                amount = self._parse_amount(price_info.get('amount'))
-                if amount is None:
-                    return {'min': 0.0, 'max': float('inf')}
-                    
-                if currency != self.base_currency:
-                    amount = float(self.currency_converter.convert(currency, self.base_currency, amount))
-                    
-                return {'min': float(amount), 'max': float('inf')}
-                
-            return {'min': 0.0, 'max': float('inf')}
+            if normalized_price is None:
+                return 'unknown'
             
+            if normalized_price == 0:
+                return 'free'
+            elif normalized_price <= self.price_tiers['budget']:
+                return 'budget'
+            elif normalized_price <= self.price_tiers['medium']:
+                return 'medium'
+            elif normalized_price <= self.price_tiers['premium']:
+                return 'premium'
+            else:
+                return 'luxury'
+                
         except Exception as e:
-            logger.error(f"Error getting price range: {str(e)}")
-            return {'min': 0.0, 'max': float('inf')} 
+            logger.error(f"Error calculating price tier: {str(e)}")
+            return 'unknown'
+    
+    def _convert_to_usd(self, amount: float, from_currency: str) -> float:
+        """Convert amount from given currency to USD."""
+        if from_currency == self.default_currency:
+            return amount
+            
+        try:
+            rate = self.currency_converter.get_rate(from_currency, self.default_currency)
+            return amount * rate
+        except Exception as e:
+            logger.error(f"Error converting currency: {str(e)}")
+            return amount  # Return original amount if conversion fails 

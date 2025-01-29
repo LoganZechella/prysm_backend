@@ -4,13 +4,13 @@ Tests for data validation schemas and pipeline.
 
 import pytest
 from datetime import datetime, timedelta
+from pydantic import ValidationError
 from app.schemas.validation import (
-    SchemaVersion,
+    EventBase,
+    LocationBase,
+    PriceBase,
     Category,
-    Location,
-    Price,
-    EventV1,
-    EventV2,
+    SchemaVersion,
     ValidationPipeline
 )
 
@@ -85,43 +85,43 @@ def test_category_validation():
 
 def test_location_validation():
     # Test valid location
-    location = Location(**valid_location())
+    location = LocationBase(**valid_location())
     assert location.name == "Central Park"
     assert location.postal_code == "10024"
     
     # Test invalid postal code
     with pytest.raises(ValueError, match="Invalid postal code format"):
-        Location(**{**valid_location(), "postal_code": "invalid@code"})
+        LocationBase(**{**valid_location(), "postal_code": "invalid@code"})
     
     # Test invalid coordinates
     with pytest.raises(ValueError):
-        Location(**{**valid_location(), "latitude": 91.0})
+        LocationBase(**{**valid_location(), "latitude": 91.0})
     with pytest.raises(ValueError):
-        Location(**{**valid_location(), "longitude": -181.0})
+        LocationBase(**{**valid_location(), "longitude": -181.0})
 
 def test_price_validation():
     # Test valid price
-    price = Price(**valid_price())
+    price = PriceBase(**valid_price())
     assert price.amount == 49.99
     assert price.currency == "USD"
     
     # Test invalid amount
     with pytest.raises(ValueError):
-        Price(**{**valid_price(), "amount": -10.0})
+        PriceBase(**{**valid_price(), "amount": -10.0})
     
     # Test invalid currency
     with pytest.raises(ValueError, match="Currency must be a 3-letter ISO code"):
-        Price(**{**valid_price(), "currency": "INVALID"})
+        PriceBase(**{**valid_price(), "currency": "INVALID"})
 
 def test_event_v1_validation(valid_event_base):
     # Test valid event
-    event = EventV1(**valid_event_base)
+    event = EventBase(**valid_event_base)
     assert event.title == "Summer Music Festival 2024"
     assert event.schema_version == SchemaVersion.V1
     
     # Test invalid title
     with pytest.raises(ValueError, match="Title cannot be empty"):
-        EventV1(**{**valid_event_base, "title": ""})
+        EventBase(**{**valid_event_base, "title": ""})
     
     # Test invalid dates
     invalid_dates = {
@@ -130,7 +130,7 @@ def test_event_v1_validation(valid_event_base):
         "end_date": datetime.now() + timedelta(days=1)
     }
     with pytest.raises(ValueError, match="End date must be after start date"):
-        EventV1(**invalid_dates)
+        EventBase(**invalid_dates)
 
 def test_event_v2_validation(valid_event_base):
     # Add V2 specific fields
@@ -145,22 +145,22 @@ def test_event_v2_validation(valid_event_base):
     }
     
     # Test valid event
-    event = EventV2(**v2_data)
+    event = EventBase(**v2_data)
     assert event.schema_version == SchemaVersion.V2
     assert event.status == "active"
     assert len(event.tags) == 3
     
     # Test invalid status
     with pytest.raises(ValueError, match="Invalid status"):
-        EventV2(**{**v2_data, "status": "invalid"})
+        EventBase(**{**v2_data, "status": "invalid"})
     
     # Test invalid attendance mode
     with pytest.raises(ValueError, match="Invalid attendance mode"):
-        EventV2(**{**v2_data, "attendance_mode": "invalid"})
+        EventBase(**{**v2_data, "attendance_mode": "invalid"})
     
     # Test invalid capacity
     with pytest.raises(ValueError):
-        EventV2(**{**v2_data, "capacity": -1})
+        EventBase(**{**v2_data, "capacity": -1})
 
 def test_validation_pipeline(valid_event_base):
     pipeline = ValidationPipeline()

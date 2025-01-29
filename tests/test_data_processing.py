@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import Mock, patch
 import json
 from datetime import datetime
-from utils.data_processing_utils import (
+from app.utils.data_processing_utils import (
     read_from_gcs,
     process_spotify_data,
     process_trends_data,

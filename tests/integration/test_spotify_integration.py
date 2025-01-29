@@ -3,8 +3,10 @@ from datetime import datetime, timedelta
 import os
 from sqlalchemy.orm import Session
 from app.models.oauth import OAuthToken
-from app.services.spotify_service import SpotifyService
+from app.services.spotify.spotify_service import SpotifyService
 from app.utils.logging import setup_logger
+from unittest.mock import Mock, patch
+from app.models.event import EventModel as Event
 
 logger = setup_logger(__name__)
 

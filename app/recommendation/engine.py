@@ -14,6 +14,7 @@ from app.services.category_extraction import CategoryExtractor
 from app.models.traits import Traits
 from app.services.trait_extractor import TraitExtractor
 from app.recommendation.filters.content import ContentBasedFilter
+from app.recommendation.models.recommendation_model import RecommendationModel
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +29,7 @@ class RecommendationEngine:
         self.category_extractor = CategoryExtractor()
         self.trait_extractor = TraitExtractor(db)
         self.content_filter = ContentBasedFilter()
-        
-        # Scoring weights
-        self.weights = {
-            'category': 0.35,
-            'location': 0.25,
-            'price': 0.15,
-            'time': 0.15,
-            'popularity': 0.10
-        }
+        self.recommendation_model = RecommendationModel()
 
     async def get_recommendations(
         self,
@@ -51,15 +44,10 @@ class RecommendationEngine:
                 logger.warning(f"No traits found for user {user_id}")
                 return []
 
-            # Process user traits
-            professional_traits = traits.professional_traits or {}
-            interest_traits = professional_traits.get("interests", [])
-            location_traits = self._process_location_traits(professional_traits)
-
             # Get candidate events
             candidate_events = await self._get_candidate_events(
-                categories=interest_traits,
-                location=location_traits,
+                categories=traits.professional_traits.get("interests", []),
+                location=self._process_location_traits(traits.professional_traits),
                 filters=filters or {}
             )
 
@@ -67,20 +55,27 @@ class RecommendationEngine:
                 logger.info("No candidate events found")
                 return []
 
-            # Score and rank events
-            scored_events = await self._score_events(candidate_events, professional_traits)
+            # Prepare context for scoring
+            context = self._prepare_scoring_context(filters)
 
-            # Apply minimum score filter if specified
-            min_score = filters.get("min_score", 0.0) if filters else 0.0
-            scored_events = [
-                event for event in scored_events
-                if event["score"] >= min_score
-            ]
+            # Score events using ML model
+            scored_events = self.recommendation_model.score_events(
+                user_traits=traits,
+                events=candidate_events,
+                context=context
+            )
 
-            # Sort by score and start time
-            scored_events.sort(key=lambda x: (-x["score"], x["start_time"]))
+            # Convert to response format
+            recommendations = []
+            for event, score, explanations in scored_events:
+                if score >= (filters.get("min_score", 0.0) if filters else 0.0):
+                    recommendations.append({
+                        "event": event,
+                        "score": score,
+                        "explanations": explanations
+                    })
 
-            return scored_events
+            return recommendations
 
         except Exception as e:
             logger.error(f"Error getting recommendations: {str(e)}")
@@ -126,15 +121,8 @@ class RecommendationEngine:
                     )
                 )
 
-            # Filter by max price if provided
-            if filters and filters.get("max_price"):
-                query = query.filter(
-                    EventModel.price_info['max_price'].astext.cast(Float) <= filters["max_price"]
-                )
-
-            # Filter by platforms if provided
-            if filters and filters.get("platforms"):
-                query = query.filter(EventModel.platform.in_(filters["platforms"]))
+            # Apply additional filters
+            query = self._apply_filters(query, filters)
 
             # Order by start time and limit results
             query = query.order_by(EventModel.start_datetime).limit(100)
@@ -145,202 +133,61 @@ class RecommendationEngine:
             logger.error(f"Error getting candidate events: {str(e)}")
             return []
 
-    async def _score_events(
-        self,
-        events: List[EventModel],
-        professional_traits: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Score events based on user traits and preferences."""
-        scored_events = []
-        
-        for event in events:
-            score = 0.0
-            explanation = []
-            
-            # Basic scoring based on event metadata
-            if event.rsvp_count:
-                popularity_score = min(event.rsvp_count / 100, 1.0)
-                score += popularity_score * 0.3
-                explanation.append(f"Popular event with {event.rsvp_count} RSVPs")
-            
-            # Location-based scoring
-            if event.venue_lat and event.venue_lon:
-                location_score = self.location_service.calculate_location_score(event)
-                score += location_score * 0.2
-                explanation.append("Good location match")
-            
-            # Category matching
-            if professional_traits.get("interests"):
-                matching_categories = set(event.categories or []) & set(professional_traits["interests"])
-                if matching_categories:
-                    score += len(matching_categories) * 0.1
-                    explanation.append(f"Matches interests: {', '.join(matching_categories)}")
-            
-            scored_events.append({
-                "event": event,
-                "score": score,
-                "explanation": explanation
-            })
-        
-        return sorted(scored_events, key=lambda x: x["score"], reverse=True)
+    def _apply_filters(self, query, filters: Dict[str, Any]):
+        """Apply additional filters to the query."""
+        if not filters:
+            return query
 
-    def _generate_explanation(
-        self,
-        event: EventModel,
-        professional_traits: Dict[str, Any],
-        score: float
-    ) -> str:
-        """Generate human-readable explanation for recommendation."""
-        reasons = []
-
-        # Check category matches
-        user_interests = professional_traits.get("interests", [])
-        matching_categories = [
-            cat for cat in event.categories
-            if any(interest.lower() in cat.lower() for interest in user_interests)
-        ]
-        if matching_categories:
-            reasons.append(
-                f"Matches your interests in {', '.join(matching_categories)}"
-            )
-
-        # Check location match
-        user_location = professional_traits.get("location", {}).get("country")
-        event_location = event.venue_country
-        if user_location and event_location and user_location == event_location:
-            reasons.append(f"Located in {event_location}")
-
-        # Add time-based reason
-        time_until_event = event.start_datetime - datetime.utcnow()
-        if time_until_event <= timedelta(days=7):
-            reasons.append("Happening this week")
-        elif time_until_event <= timedelta(days=30):
-            reasons.append("Happening this month")
-
-        if not reasons:
-            return "Based on your general preferences"
-
-        return "; ".join(reasons)
-
-    def score_events_batch(
-        self,
-        events: List[EventModel],
-        preferences: UserPreferences
-    ) -> np.ndarray:
-        """
-        Score multiple events in batch using vectorized operations.
-        
-        Args:
-            events: List of events to score
-            preferences: User preferences
-            
-        Returns:
-            Array of scores between 0 and 1 for each event
-        """
-        if not events:
-            return np.array([])
-            
-        # Pre-compute common values
-        now = datetime.utcnow()
-        preferred_categories = set(preferences.preferred_categories)
-        excluded_categories = set(preferences.excluded_categories)
-        
-        # Initialize score arrays
-        n_events = len(events)
-        category_scores = np.zeros(n_events)
-        location_scores = np.zeros(n_events)
-        price_scores = np.zeros(n_events)
-        time_scores = np.zeros(n_events)
-        popularity_scores = np.zeros(n_events)
-        
-        # Batch compute category scores
-        for i, event in enumerate(events):
-            event_categories = set(event.categories)
-            if event_categories & excluded_categories:
-                category_scores[i] = 0.0
-            elif preferred_categories:
-                overlap = len(event_categories & preferred_categories)
-                category_scores[i] = min(1.0, overlap / len(preferred_categories))
-            else:
-                category_scores[i] = 0.5
-        
-        # Batch compute location scores
-        if preferences.preferred_location:
-            max_distance = preferences.preferred_location.get('max_distance_km', 50)
-            distances = np.array([
-                self.location_service.calculate_distance(
-                    event.location,
-                    preferences.preferred_location
+        try:
+            # Filter by max price
+            if filters.get("max_price"):
+                query = query.filter(
+                    EventModel.price_info['max_price'].astext.cast(float) <= filters["max_price"]
                 )
-                for event in events
-            ])
-            location_scores = np.where(
-                distances > max_distance,
-                0.0,
-                1.0 - (distances / max_distance)
-            )
-        else:
-            location_scores.fill(0.5)
+
+            # Filter by platforms
+            if filters.get("platforms"):
+                query = query.filter(EventModel.platform.in_(filters["platforms"]))
+
+            # Filter by date range
+            if filters.get("start_date"):
+                query = query.filter(EventModel.start_datetime >= filters["start_date"])
+            if filters.get("end_date"):
+                query = query.filter(EventModel.start_datetime <= filters["end_date"])
+
+            # Filter by event type
+            if filters.get("event_types"):
+                query = query.filter(EventModel.event_type.in_(filters["event_types"]))
+
+            return query
+
+        except Exception as e:
+            logger.error(f"Error applying filters: {str(e)}")
+            return query
+
+    def _prepare_scoring_context(self, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Prepare context dictionary for event scoring."""
+        context = {}
         
-        # Batch compute price scores
-        if preferences.max_price:
-            normalized_prices = np.array([
-                self.price_normalizer.normalize_price(event.price_info)
-                for event in events
-            ])
-            price_range = preferences.max_price - preferences.min_price
-            if price_range <= 0:
-                price_scores.fill(1.0)
-            else:
-                price_scores = np.where(
-                    normalized_prices > preferences.max_price,
-                    0.0,
-                    np.where(
-                        normalized_prices < preferences.min_price,
-                        0.5,
-                        1.0 - ((normalized_prices - preferences.min_price) / price_range)
-                    )
+        if filters:
+            # Normalize price filter
+            if filters.get("max_price"):
+                context["max_price_normalized"] = self.price_normalizer.normalize_price(
+                    filters["max_price"]
                 )
-        else:
-            price_scores.fill(0.5)
+            
+            # Add time preferences
+            if filters.get("preferred_times"):
+                context["preferred_times"] = filters["preferred_times"]
+            
+            # Add location preferences
+            if filters.get("max_distance"):
+                context["max_distance"] = filters["max_distance"]
+            
+            # Add any other relevant context from filters
+            context["filters"] = filters
         
-        # Batch compute time scores
-        days_until = np.array([
-            (event.start_datetime - now).days if event.start_datetime else float('inf')
-            for event in events
-        ])
-        
-        time_scores = np.where(
-            days_until <= 7,
-            0.85,
-            np.where(
-                days_until <= 30,
-                0.85 - (0.5 * (days_until - 7) / 23),
-                np.where(
-                    days_until <= 90,
-                    0.35 - (0.25 * (days_until - 30) / 60),
-                    0.1
-                )
-            )
-        )
-        
-        # Batch compute popularity scores
-        view_counts = np.array([
-            getattr(event, 'view_count', 0) or 0
-            for event in events
-        ])
-        popularity_scores = np.minimum(1.0, view_counts / 1000)
-        
-        # Compute weighted sum
-        final_scores = (
-            self.weights['category'] * category_scores +
-            self.weights['location'] * location_scores +
-            self.weights['price'] * price_scores +
-            self.weights['time'] * time_scores +
-            self.weights['popularity'] * popularity_scores
-        )
-        
-        return final_scores
+        return context
 
     def get_personalized_recommendations(
         self,
@@ -348,32 +195,26 @@ class RecommendationEngine:
         preferences: UserPreferences,
         limit: int = 10
     ) -> List[EventModel]:
-        """
-        Generate personalized event recommendations for a user.
-        
-        Args:
-            events: List of available events to choose from
-            preferences: User's preference settings
-            limit: Maximum number of recommendations to return
-            
-        Returns:
-            List of recommended events, ordered by relevance
-        """
-        if not events:
-            return []
-            
-        # Score all events in batch
-        scores = self.score_events_batch(events, preferences)
-        
-        # Get indices of top N scores
-        if limit:
-            top_indices = np.argpartition(scores, -min(limit, len(scores)))[-limit:]
-            top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
-        else:
-            top_indices = np.argsort(scores)[::-1]
-        
-        # Return events in order of score
-        return [events[i] for i in top_indices]
+        """Get personalized recommendations from a list of events."""
+        try:
+            # Get user traits
+            traits = self.trait_extractor.get_traits(preferences.user_id)
+            if not traits:
+                logger.warning(f"No traits found for user {preferences.user_id}")
+                return events[:limit]  # Return top events without personalization
+
+            # Score events using ML model
+            scored_events = self.recommendation_model.score_events(
+                user_traits=traits,
+                events=events
+            )
+
+            # Return top scoring events
+            return [event for event, _, _ in scored_events[:limit]]
+
+        except Exception as e:
+            logger.error(f"Error getting personalized recommendations: {str(e)}")
+            return events[:limit]
 
     def get_trending_recommendations(
         self,
@@ -381,25 +222,60 @@ class RecommendationEngine:
         timeframe_days: int = 7,
         limit: int = 10
     ) -> List[EventModel]:
-        """Get trending events based on recent popularity."""
-        if not events:
-            return []
+        """Get trending recommendations based on recent engagement."""
+        try:
+            # Filter events within timeframe
+            recent_cutoff = datetime.utcnow() - timedelta(days=timeframe_days)
+            recent_events = [
+                event for event in events
+                if event.start_datetime >= recent_cutoff
+            ]
+
+            if not recent_events:
+                return []
+
+            # Score events based on engagement metrics
+            scored_events = []
+            for event in recent_events:
+                engagement_score = self._calculate_engagement_score(event)
+                scored_events.append((event, engagement_score))
+
+            # Sort by score and return top events
+            scored_events.sort(key=lambda x: x[1], reverse=True)
+            return [event for event, _ in scored_events[:limit]]
+
+        except Exception as e:
+            logger.error(f"Error getting trending recommendations: {str(e)}")
+            return events[:limit]
+
+    def _calculate_engagement_score(self, event: EventModel) -> float:
+        """Calculate engagement score for trending recommendations."""
+        try:
+            metrics = event.metrics or {}
             
-        # Filter events within timeframe
-        cutoff_date = datetime.utcnow() - timedelta(days=timeframe_days)
-        recent_events = [
-            event for event in events 
-            if event.start_datetime and event.start_datetime >= cutoff_date
-        ]
-        
-        # Sort by popularity (RSVP count)
-        trending = sorted(
-            recent_events,
-            key=lambda x: (x.rsvp_count or 0),
-            reverse=True
-        )
-        
-        return trending[:limit]
+            # Combine various engagement metrics
+            views = metrics.get('view_count', 0)
+            saves = metrics.get('save_count', 0)
+            shares = metrics.get('share_count', 0)
+            registrations = metrics.get('registration_count', 0)
+            
+            # Weight different types of engagement
+            score = (
+                0.1 * views +
+                0.3 * saves +
+                0.3 * shares +
+                0.3 * registrations
+            )
+            
+            # Normalize score
+            max_score = 1000  # Adjust based on typical engagement levels
+            normalized_score = min(1.0, score / max_score)
+            
+            return normalized_score
+            
+        except Exception as e:
+            logger.error(f"Error calculating engagement score: {str(e)}")
+            return 0.0
 
     def get_similar_recommendations(
         self,
@@ -407,42 +283,67 @@ class RecommendationEngine:
         candidate_events: List[EventModel],
         limit: int = 10
     ) -> List[EventModel]:
-        """Find events similar to a reference event."""
-        if not reference_event or not candidate_events:
-            return []
+        """Get recommendations similar to a reference event."""
+        try:
+            # Extract reference event features
+            ref_vectors = self.recommendation_model._extract_event_vectors(reference_event)
             
-        similar_events = []
-        ref_categories = set(reference_event.categories or [])
-        
-        for event in candidate_events:
-            if event.id == reference_event.id:
-                continue
-                
-            similarity_score = 0
-            
-            # Category similarity
-            event_categories = set(event.categories or [])
-            if ref_categories and event_categories:
-                category_similarity = len(ref_categories & event_categories) / len(ref_categories | event_categories)
-                similarity_score += category_similarity * 0.4
-            
-            # Location similarity
-            if (reference_event.venue_lat and reference_event.venue_lon and 
-                event.venue_lat and event.venue_lon):
-                location_similarity = self.location_service.calculate_similarity(
-                    reference_event, event
+            # Score candidate events based on similarity
+            scored_events = []
+            for event in candidate_events:
+                if event.id == reference_event.id:
+                    continue
+                    
+                event_vectors = self.recommendation_model._extract_event_vectors(event)
+                similarity_score = self._calculate_event_similarity(
+                    ref_vectors, event_vectors
                 )
-                similarity_score += location_similarity * 0.3
+                scored_events.append((event, similarity_score))
             
-            # Time proximity
-            if reference_event.start_datetime and event.start_datetime:
-                time_diff = abs((reference_event.start_datetime - event.start_datetime).total_seconds())
-                time_similarity = 1.0 / (1.0 + time_diff / (24 * 3600))  # Normalize to 1 day
-                similarity_score += time_similarity * 0.3
+            # Sort by similarity and return top events
+            scored_events.sort(key=lambda x: x[1], reverse=True)
+            return [event for event, _ in scored_events[:limit]]
             
-            similar_events.append((event, similarity_score))
-        
-        # Sort by similarity score
-        similar_events.sort(key=lambda x: x[1], reverse=True)
-        
-        return [event for event, _ in similar_events[:limit]] 
+        except Exception as e:
+            logger.error(f"Error getting similar recommendations: {str(e)}")
+            return candidate_events[:limit]
+
+    def _calculate_event_similarity(
+        self,
+        ref_vectors: Dict[str, Any],
+        event_vectors: Dict[str, Any]
+    ) -> float:
+        """Calculate similarity between two events."""
+        try:
+            scores = []
+            
+            # Compare content vectors
+            if ref_vectors.get('topic_vector') and event_vectors.get('topic_vector'):
+                topic_sim = cosine_similarity(
+                    [list(ref_vectors['topic_vector'].values())],
+                    [list(event_vectors['topic_vector'].values())]
+                )[0][0]
+                scores.append(topic_sim)
+            
+            # Compare category vectors
+            if ref_vectors.get('category_vector') and event_vectors.get('category_vector'):
+                category_sim = cosine_similarity(
+                    [list(ref_vectors['category_vector'].values())],
+                    [list(event_vectors['category_vector'].values())]
+                )[0][0]
+                scores.append(category_sim)
+            
+            # Compare other relevant features
+            if ref_vectors.get('contextual_features') and event_vectors.get('contextual_features'):
+                price_diff = abs(
+                    ref_vectors['contextual_features']['price_normalized'] -
+                    event_vectors['contextual_features']['price_normalized']
+                )
+                price_sim = 1.0 - min(1.0, price_diff)
+                scores.append(price_sim)
+            
+            return np.mean(scores) if scores else 0.0
+            
+        except Exception as e:
+            logger.error(f"Error calculating event similarity: {str(e)}")
+            return 0.0 

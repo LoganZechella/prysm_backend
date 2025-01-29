@@ -78,7 +78,7 @@ def validate_trends_data(topics_data: List[Dict[str, Any]], interest_data: Dict[
     
     return len(errors) == 0, errors
 
-def validate_event_data(events_data: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
+def validate_event(events_data: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
     """
     Validate event data quality.
     

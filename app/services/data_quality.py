@@ -1,8 +1,10 @@
-from typing import Dict, Optional, Tuple, List
-from datetime import datetime, timedelta
-from app.schemas.event import Event, PriceInfo
+"""Data quality validation for events."""
 
-def validate_event(event: Event) -> bool:
+from typing import Dict, Optional, List
+from datetime import datetime
+from app.schemas.event import EventBase, PriceInfo
+
+def validate_event(event: EventBase) -> bool:
     """
     Validate an event for data quality.
     
@@ -16,21 +18,31 @@ def validate_event(event: Event) -> bool:
     if not check_required_fields(event):
         return False
         
-    # Check coordinates
-    if not validate_coordinates(event.location.coordinates):
-        return False
+    # Check coordinates if present
+    if event.venue_lat is not None and event.venue_lon is not None:
+        if not validate_coordinates({
+            "lat": event.venue_lat,
+            "lon": event.venue_lon
+        }):
+            return False
         
     # Check dates
     if not validate_dates(event.start_datetime, event.end_datetime):
         return False
         
     # Check prices if present
-    if event.price_info and not validate_prices(event.price_info):
-        return False
+    if event.price_info:
+        price_info = PriceInfo(
+            currency=event.price_info["currency"],
+            min_price=event.price_info["min_price"],
+            max_price=event.price_info["max_price"]
+        )
+        if not validate_prices(price_info):
+            return False
         
     return True
 
-def check_required_fields(event: Event) -> bool:
+def check_required_fields(event: EventBase) -> bool:
     """
     Check that all required fields are present and valid.
     
@@ -44,15 +56,20 @@ def check_required_fields(event: Event) -> bool:
     if not event.title or len(event.title.strip()) == 0:
         return False
         
-    # Check description
-    if not event.description or len(event.description.strip()) == 0:
+    # Check start datetime
+    if not event.start_datetime:
         return False
         
-    # Check location
-    if not event.location.venue_name or len(event.location.venue_name.strip()) == 0:
+    # Check venue
+    if not event.venue_name or not event.venue_city:
         return False
         
-    if not event.location.city or len(event.location.city.strip()) == 0:
+    # Check platform and url
+    if not event.platform or not event.url:
+        return False
+        
+    # Check categories
+    if not event.categories:
         return False
         
     return True
@@ -62,16 +79,17 @@ def validate_coordinates(coordinates: Dict[str, float]) -> bool:
     Validate geographical coordinates.
     
     Args:
-        coordinates: Dictionary with lat/lon coordinates
+        coordinates: Dictionary containing lat/lon coordinates
         
     Returns:
         True if coordinates are valid, False otherwise
     """
-    if "lat" not in coordinates or "lon" not in coordinates:
+    # Check required keys
+    if 'lat' not in coordinates or 'lon' not in coordinates:
         return False
         
-    lat = coordinates["lat"]
-    lon = coordinates["lon"]
+    lat = coordinates['lat']
+    lon = coordinates['lon']
     
     # Check latitude range (-90 to 90)
     if lat < -90 or lat > 90:
@@ -115,12 +133,16 @@ def validate_prices(price_info: PriceInfo) -> bool:
         True if prices are valid, False otherwise
     """
     # Check for negative prices
-    if price_info.min_price < 0 or price_info.max_price < 0:
+    if price_info.min_price is not None and price_info.min_price < 0:
         return False
         
-    # Check min <= max
-    if price_info.min_price > price_info.max_price:
+    if price_info.max_price is not None and price_info.max_price < 0:
         return False
+        
+    # Check min <= max if both are present
+    if price_info.min_price is not None and price_info.max_price is not None:
+        if price_info.min_price > price_info.max_price:
+            return False
         
     # Check currency
     valid_currencies = {"USD", "EUR", "GBP"}

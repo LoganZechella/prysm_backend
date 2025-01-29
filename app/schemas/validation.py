@@ -5,8 +5,8 @@ Data validation schemas with versioning support.
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
-from pydantic import BaseModel, Field, validator, root_validator
-import re
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from typing_extensions import Literal
 from app.monitoring.performance import PerformanceMonitor
 
 class SchemaVersion(str, Enum):
@@ -19,7 +19,7 @@ class Category(BaseModel):
     parent: Optional[str] = None
     confidence: float = Field(ge=0.0, le=1.0)
     
-    @validator('name')
+    @field_validator('name')
     def validate_category_name(cls, v: str) -> str:
         v = v.strip()
         if not v:
@@ -28,122 +28,151 @@ class Category(BaseModel):
             raise ValueError("Category name contains invalid characters")
         return v
 
-class Location(BaseModel):
-    """Event location schema"""
+class LocationBase(BaseModel):
+    """Base location schema."""
     name: str
-    address: str
+    address: Optional[str] = None
     city: str
-    state: Optional[str]
+    state: Optional[str] = None
     country: str
-    postal_code: Optional[str]
-    latitude: Optional[float] = Field(ge=-90.0, le=90.0)
-    longitude: Optional[float] = Field(ge=-180.0, le=180.0)
+    postal_code: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     
-    @validator('postal_code')
-    def validate_postal_code(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip().upper()
-        if not re.match(r'^[A-Z0-9\-\s]+$', v):
-            raise ValueError("Invalid postal code format")
-        return v
+    @field_validator('name')
+    def validate_name(cls, v):
+        if not v.strip():
+            raise ValueError("Name cannot be empty")
+        return v.strip()
+        
+    @field_validator('postal_code')
+    def validate_postal_code(cls, v):
+        if v and not v.strip():
+            raise ValueError("Postal code cannot be empty if provided")
+        return v.strip() if v else None
 
-class Price(BaseModel):
-    """Event price schema"""
-    amount: float = Field(ge=0.0)
+class PriceBase(BaseModel):
+    """Base price schema."""
     currency: str
-    tier: Optional[str]
+    amount: float
+    tier: Optional[str] = None
     
-    @validator('currency')
-    def validate_currency(cls, v: str) -> str:
-        v = v.strip().upper()
-        if not re.match(r'^[A-Z]{3}$', v):
-            raise ValueError("Currency must be a 3-letter ISO code")
-        return v
+    @field_validator('currency')
+    def validate_currency(cls, v):
+        if not v.strip():
+            raise ValueError("Currency cannot be empty")
+        return v.strip().upper()
 
 class EventBase(BaseModel):
-    """Base event schema with common fields"""
+    """Base event schema."""
     title: str
-    description: str
+    description: Optional[str] = None
     start_date: datetime
-    end_date: Optional[datetime]
-    categories: List[Category]
-    location: Location
-    prices: List[Price]
-    source: str
+    end_date: Optional[datetime] = None
+    location: LocationBase
+    price_info: Optional[List[PriceBase]] = None
+    categories: Optional[List[str]] = None
+    tags: Optional[List[str]] = None
     external_id: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    source: str
+    url: str
     
-    @validator('title')
-    def validate_title(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
+    model_config = ConfigDict(from_attributes=True)
+    
+    @field_validator('title')
+    def validate_title(cls, v):
+        if not v.strip():
             raise ValueError("Title cannot be empty")
-        if len(v) > 200:
-            raise ValueError("Title is too long (max 200 characters)")
-        return v
-    
-    @validator('description')
-    def validate_description(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("Description cannot be empty")
-        return v
-    
-    @validator('end_date')
-    def validate_end_date(cls, v: Optional[datetime], values: Dict[str, Any]) -> Optional[datetime]:
-        if v and 'start_date' in values and v < values['start_date']:
+        return v.strip()
+        
+    @field_validator('description')
+    def validate_description(cls, v):
+        if v and not v.strip():
+            raise ValueError("Description cannot be empty if provided")
+        return v.strip() if v else None
+        
+    @field_validator('end_date')
+    def validate_end_date(cls, v, values):
+        if v and 'start_date' in values.data and v < values.data['start_date']:
             raise ValueError("End date must be after start date")
         return v
-    
-    @validator('external_id')
-    def validate_external_id(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
+        
+    @field_validator('external_id')
+    def validate_external_id(cls, v):
+        if not v.strip():
             raise ValueError("External ID cannot be empty")
-        if not re.match(r'^[a-zA-Z0-9\-_]+$', v):
-            raise ValueError("External ID contains invalid characters")
-        return v
+        return v.strip()
 
 class EventV1(EventBase):
-    """Version 1.0 of event schema"""
-    schema_version: str = Field(default=SchemaVersion.V1, const=True)
+    """Schema version 1.0 for events."""
+    schema_version: Literal[SchemaVersion.V1] = Field(default=SchemaVersion.V1)
 
 class EventV2(EventBase):
-    """Version 2.0 of event schema with additional fields"""
-    schema_version: str = Field(default=SchemaVersion.V2, const=True)
-    status: str = Field(default="active")
-    featured: bool = Field(default=False)
-    tags: List[str] = Field(default_factory=list)
-    attendance_mode: str = Field(default="in_person")
-    capacity: Optional[int] = Field(ge=0)
-    organizer: Dict[str, Any] = Field(default_factory=dict)
-    
-    @validator('status')
-    def validate_status(cls, v: str) -> str:
-        valid_statuses = {'active', 'cancelled', 'postponed', 'rescheduled'}
-        v = v.lower()
-        if v not in valid_statuses:
-            raise ValueError(f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
-        return v
-    
-    @validator('attendance_mode')
-    def validate_attendance_mode(cls, v: str) -> str:
-        valid_modes = {'in_person', 'online', 'hybrid'}
-        v = v.lower()
-        if v not in valid_modes:
-            raise ValueError(f"Invalid attendance mode. Must be one of: {', '.join(valid_modes)}")
-        return v
-    
-    @validator('tags')
-    def validate_tags(cls, v: List[str]) -> List[str]:
-        return [tag.strip().lower() for tag in v if tag.strip()]
+    """Schema version 2.0 for events with additional fields."""
+    schema_version: Literal[SchemaVersion.V2] = Field(default=SchemaVersion.V2)
+    venue: Optional[Dict[str, Any]] = None
+    organizer: Optional[Dict[str, Any]] = None
+    attendees: Optional[int] = None
+    status: Optional[str] = None
+    last_updated: Optional[datetime] = None
 
 class ValidationPipeline:
-    """Pipeline for validating and transforming event data"""
+    """Pipeline for validating and upgrading event schemas."""
     
     def __init__(self):
         self.performance_monitor = PerformanceMonitor()
+    
+    @staticmethod
+    def validate_event(event_data: Dict[str, Any], target_version: SchemaVersion = SchemaVersion.V2) -> Dict[str, Any]:
+        """
+        Validate event data and upgrade to target schema version.
+        
+        Args:
+            event_data: Raw event data
+            target_version: Target schema version
+            
+        Returns:
+            Validated and upgraded event data
+        """
+        # Determine current version
+        current_version = SchemaVersion(event_data.get('schema_version', SchemaVersion.V1))
+        
+        # Validate against current version
+        if current_version == SchemaVersion.V1:
+            event = EventV1(**event_data)
+        else:
+            event = EventV2(**event_data)
+            
+        # Upgrade if needed
+        if current_version != target_version:
+            if target_version == SchemaVersion.V2:
+                return ValidationPipeline._upgrade_to_v2(event)
+            else:
+                return ValidationPipeline._downgrade_to_v1(event)
+                
+        return event.model_dump()
+        
+    @staticmethod
+    def _upgrade_to_v2(event: EventV1) -> Dict[str, Any]:
+        """Upgrade event from V1 to V2 schema."""
+        data = event.model_dump()
+        data['schema_version'] = SchemaVersion.V2
+        data['venue'] = None
+        data['organizer'] = None
+        data['attendees'] = None
+        data['status'] = None
+        data['last_updated'] = datetime.utcnow()
+        return EventV2(**data).model_dump()
+        
+    @staticmethod
+    def _downgrade_to_v1(event: EventV2) -> Dict[str, Any]:
+        """Downgrade event from V2 to V1 schema."""
+        data = event.model_dump()
+        data['schema_version'] = SchemaVersion.V1
+        # Remove V2-specific fields
+        for field in ['venue', 'organizer', 'attendees', 'status', 'last_updated']:
+            data.pop(field, None)
+        return EventV1(**data).model_dump()
     
     def validate_event(self, data: Dict[str, Any], version: SchemaVersion = SchemaVersion.V2) -> Dict[str, Any]:
         """

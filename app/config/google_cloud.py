@@ -1,53 +1,84 @@
 """
-Google Cloud Platform configuration and settings.
+Google Cloud Platform configuration and utilities.
 """
 
 import os
-from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
+from google.cloud import storage, language_v2
+from google.oauth2 import service_account
+from functools import lru_cache
 
-# GCP Credentials handling
-GCP_CREDENTIALS_PATH = os.getenv('GCP_CREDENTIALS_PATH', str(Path(__file__).parent / 'credentials' / 'gcp-credentials.json'))
+from .settings import get_settings
 
-# API Settings
-NLP_API_REGION = os.getenv('NLP_API_REGION', 'global')
-NLP_API_TIMEOUT = int(os.getenv('NLP_API_TIMEOUT', '30'))  # seconds
+settings = get_settings()
 
-# Rate Limiting
-NLP_REQUESTS_PER_MINUTE = int(os.getenv('NLP_REQUESTS_PER_MINUTE', '600'))
-NLP_BURST_SIZE = int(os.getenv('NLP_BURST_SIZE', '100'))
+def get_credentials_path() -> str:
+    """Get path to Google Cloud credentials file."""
+    credentials_path = settings.GOOGLE_APPLICATION_CREDENTIALS
+    if not credentials_path or not os.path.exists(credentials_path):
+        raise ValueError(
+            "Google Cloud credentials file not found. "
+            "Please set GOOGLE_APPLICATION_CREDENTIALS environment variable."
+        )
+    return credentials_path
 
-# Caching
-NLP_CACHE_TTL = int(os.getenv('NLP_CACHE_TTL', '3600'))  # 1 hour in seconds
-NLP_CACHE_MAX_SIZE = int(os.getenv('NLP_CACHE_MAX_SIZE', '1000'))
-
-# Retry Configuration
-NLP_MAX_RETRIES = int(os.getenv('NLP_MAX_RETRIES', '3'))
-NLP_INITIAL_RETRY_DELAY = float(os.getenv('NLP_INITIAL_RETRY_DELAY', '1.0'))
-NLP_MAX_RETRY_DELAY = float(os.getenv('NLP_MAX_RETRY_DELAY', '10.0'))
-
-def validate_gcp_credentials() -> bool:
+def get_credentials(
+    scopes: Optional[list] = None
+) -> service_account.Credentials:
     """
-    Validates that GCP credentials file exists and is readable.
+    Get Google Cloud credentials from service account key file.
     
-    Returns:
-        bool: True if credentials are valid, False otherwise
-    """
-    if not os.path.exists(GCP_CREDENTIALS_PATH):
-        return False
+    Args:
+        scopes: Optional list of scopes to request
         
-    try:
-        # Check if file is readable
-        with open(GCP_CREDENTIALS_PATH, 'r') as f:
-            return True
-    except Exception:
-        return False
-
-def get_credentials_path() -> Optional[str]:
-    """
-    Gets the validated credentials path or None if invalid.
-    
     Returns:
-        Optional[str]: Path to credentials file if valid, None otherwise
+        Google Cloud credentials
     """
-    return GCP_CREDENTIALS_PATH if validate_gcp_credentials() else None 
+    if not scopes:
+        scopes = [
+            'https://www.googleapis.com/auth/cloud-platform',
+            'https://www.googleapis.com/auth/cloud-language'
+        ]
+        
+    credentials_path = get_credentials_path()
+    return service_account.Credentials.from_service_account_file(
+        credentials_path,
+        scopes=scopes
+    )
+
+@lru_cache()
+def get_language_client() -> language_v2.LanguageServiceClient:
+    """Get cached Google Cloud Natural Language client."""
+    credentials = get_credentials()
+    return language_v2.LanguageServiceClient(credentials=credentials)
+
+@lru_cache()
+def get_storage_client() -> storage.Client:
+    """Get cached Google Cloud Storage client."""
+    credentials = get_credentials()
+    return storage.Client(
+        credentials=credentials,
+        project=settings.GCP_PROJECT_ID
+    )
+
+def get_nlp_config() -> Dict[str, Any]:
+    """Get NLP service configuration."""
+    return {
+        'api_region': settings.NLP_API_REGION,
+        'timeout': settings.NLP_API_TIMEOUT,
+        'requests_per_minute': settings.NLP_REQUESTS_PER_MINUTE,
+        'burst_size': settings.NLP_BURST_SIZE,
+        'cache_ttl': settings.NLP_CACHE_TTL,
+        'cache_max_size': settings.NLP_CACHE_MAX_SIZE,
+        'max_retries': settings.NLP_MAX_RETRIES,
+        'initial_retry_delay': settings.NLP_INITIAL_RETRY_DELAY,
+        'max_retry_delay': settings.NLP_MAX_RETRY_DELAY
+    }
+
+def get_storage_config() -> Dict[str, Any]:
+    """Get storage service configuration."""
+    return {
+        'raw_bucket': settings.GCS_RAW_BUCKET,
+        'processed_bucket': settings.GCS_PROCESSED_BUCKET,
+        'project_id': settings.GCP_PROJECT_ID
+    } 
