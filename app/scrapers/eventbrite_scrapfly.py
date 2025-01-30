@@ -3,7 +3,7 @@ Eventbrite scraper implementation using Scrapfly.
 """
 
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import json
 from bs4 import BeautifulSoup
@@ -21,6 +21,9 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
     def __init__(self, api_key: str, **kwargs):
         """Initialize the Eventbrite scraper"""
         super().__init__(api_key=api_key, platform='eventbrite', **kwargs)
+        self.default_city = "Louisville"
+        self.default_state = "KY"
+        self.default_country = "US"
         
     async def _make_request(self, url: str) -> Optional[BeautifulSoup]:
         """Make a request to Eventbrite and return BeautifulSoup object"""
@@ -53,8 +56,19 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
             'asp': True,  # Enable anti-scraping protection
             'country': 'US',
             'tags': ['eventbrite', 'events'],
+            'session': True,  # Enable session handling
+            'retry': {  # Add retry configuration
+                'enabled': True,
+                'max_retries': 3,
+                'retry_delay': 1000,
+                'exceptions': [
+                    'ScrapflyAspError',
+                    'ScrapflyProxyError',
+                    'UpstreamHttpClientError'
+                ]
+            },
             'headers': {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
                 'Connection': 'keep-alive',
@@ -266,17 +280,13 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
             address = location.get("address", {})
             geo = location.get("geo", {})
             
-            venue_info = {
-                "venue_name": location.get("name", ""),
-                "address": ", ".join(filter(None, [
-                    address.get("streetAddress", ""),
-                    address.get("addressLocality", ""),
-                    address.get("addressRegion", ""),
-                    address.get("postalCode", "")
-                ])),
-                "latitude": float(geo.get("latitude", 0)),
-                "longitude": float(geo.get("longitude", 0))
-            }
+            # Extract venue information with defaults
+            venue_name = location.get("name", "Unknown Venue")  # Default venue name
+            venue_city = address.get("addressLocality", self.default_city)  # Default city
+            venue_state = address.get("addressRegion", self.default_state)  # Default state
+            venue_country = address.get("addressCountry", self.default_country)  # Default country
+            venue_lat = float(geo.get("latitude", 0.0))  # Default latitude
+            venue_lon = float(geo.get("longitude", 0.0))  # Default longitude
             
             # Extract event URL and ID
             url = event_data.get("url", "")
@@ -298,25 +308,30 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
                     prices.append(price)
             
             return {
+                "platform_id": event_id,
                 "title": event_data.get("name", ""),
                 "description": event_data.get("description", ""),
-                "start_time": start_time,
-                "end_time": end_time,
-                "location": venue_info,
-                "image_url": event_data.get("image", ""),
-                "source": self.platform,
-                "event_id": event_id,
+                "start_datetime": start_time,
+                "end_datetime": end_time,
                 "url": url,
-                "prices": prices,
-                "organizer": event_data.get("organizer", {}).get("name", ""),
-                "performers": [p.get("name", "") for p in event_data.get("performers", [])],
+                "venue_name": venue_name,
+                "venue_lat": venue_lat,
+                "venue_lon": venue_lon,
+                "venue_city": venue_city,
+                "venue_state": venue_state,
+                "venue_country": venue_country,
+                "organizer_name": event_data.get("organizer", {}).get("name", ""),
+                "organizer_id": "",
+                "platform": "eventbrite",
+                "is_online": event_data.get("eventAttendanceMode", "") == "OnlineEventAttendanceMode",
+                "rsvp_count": 0,  # Eventbrite doesn't provide this in JSON-LD
+                "price_info": prices,
                 "categories": [
                     cat.get("name", "").lower()
                     for cat in event_data.get("superEvent", {}).get("type", [])
                 ],
-                "tags": event_data.get("keywords", "").split(",") if event_data.get("keywords") else [],
-                "attendance_mode": event_data.get("eventAttendanceMode", "offline"),
-                "status": event_data.get("eventStatus", "scheduled")
+                "image_url": event_data.get("image", ""),
+                "technical_level": 0.5  # Default technical level
             }
             
         except Exception as e:
@@ -352,23 +367,45 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
                     
                     logger.debug(f"[eventbrite] Event URL: {url}, ID: {event_id}")
                     
-                    # Get image URL
+                    # Extract image URL
                     img = card.find("img", {"class": re.compile(r"eds-event-card__image.*")})
                     image_url = img.get("src", "") if img else ""
                     
+                    # Parse start datetime
+                    start_datetime = self._parse_date(date_elem.get_text(strip=True))
+                    # Set end datetime to 2 hours after start by default
+                    end_datetime = start_datetime + timedelta(hours=2)
+                    
+                    # Extract venue information with defaults
+                    venue_name = location_elem.get_text(strip=True) if location_elem else "Unknown Venue"
+                    venue_city = self.default_city  # Default city
+                    venue_state = self.default_state  # Default state
+                    venue_country = self.default_country  # Default country
+                    venue_lat = 0.0  # Default latitude
+                    venue_lon = 0.0  # Default longitude
+                    
                     event = {
+                        "platform_id": event_id,
                         "title": title_elem.get_text(strip=True),
-                        "start_time": self._parse_date(date_elem.get_text(strip=True)),
-                        "location": {
-                            "venue_name": location_elem.get_text(strip=True) if location_elem else "",
-                            "address": "",
-                            "latitude": 0,
-                            "longitude": 0
-                        },
-                        "source": self.platform,
-                        "event_id": event_id,
+                        "description": "",  # Full description requires fetching event page
+                        "start_datetime": start_datetime,
+                        "end_datetime": end_datetime,
                         "url": url,
-                        "image_url": image_url
+                        "venue_name": venue_name,
+                        "venue_lat": venue_lat,
+                        "venue_lon": venue_lon,
+                        "venue_city": venue_city,
+                        "venue_state": venue_state,
+                        "venue_country": venue_country,
+                        "organizer_name": "",  # Not available in card view
+                        "organizer_id": "",
+                        "platform": "eventbrite",
+                        "is_online": False,  # Default to in-person
+                        "rsvp_count": 0,
+                        "price_info": [],  # Price info requires fetching event page
+                        "categories": [],  # Categories not available in card view
+                        "image_url": image_url,
+                        "technical_level": 0.5  # Default technical level
                     }
                     
                     logger.debug(f"[eventbrite] Parsed event: {json.dumps(event, indent=2, default=str)}")
@@ -387,9 +424,46 @@ class EventbriteScrapflyScraper(ScrapflyBaseScraper):
     def _parse_date(self, date_str: str) -> datetime:
         """Parse date string from event card"""
         try:
-            # Add proper date parsing logic based on Eventbrite's format
-            return datetime.now()  # Placeholder
-        except Exception:
+            # Eventbrite date formats can vary, but common formats are:
+            # "Sat, Feb 8" or "Saturday, February 8"
+            # "7:00 PM" or "19:00"
+            
+            # First try to find a date pattern
+            date_match = re.search(r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+([A-Za-z]+)\s+(\d{1,2})', date_str)
+            if not date_match:
+                logger.warning(f"[eventbrite] Could not parse date from: {date_str}")
+                return datetime.now()
+            
+            month = date_match.group(1)
+            day = int(date_match.group(2))
+            
+            # Try to find time pattern
+            time_match = re.search(r'(\d{1,2}):(\d{2})(?:\s*(AM|PM))?', date_str)
+            if not time_match:
+                logger.warning(f"[eventbrite] Could not parse time from: {date_str}")
+                return datetime.now()
+            
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2))
+            ampm = time_match.group(3)
+            
+            # Convert to 24-hour format if needed
+            if ampm and ampm.upper() == 'PM' and hour < 12:
+                hour += 12
+            elif ampm and ampm.upper() == 'AM' and hour == 12:
+                hour = 0
+            
+            # Use current year, but if the date would be in the past,
+            # use next year instead
+            year = datetime.now().year
+            dt = datetime.strptime(f"{year} {month} {day} {hour}:{minute}", "%Y %B %d %H:%M")
+            if dt < datetime.now():
+                dt = dt.replace(year=year + 1)
+            
+            return dt
+            
+        except Exception as e:
+            logger.warning(f"[eventbrite] Error parsing date '{date_str}': {str(e)}")
             return datetime.now()
     
     def _has_next_page(self, soup: BeautifulSoup) -> bool:

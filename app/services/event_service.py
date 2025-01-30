@@ -1,10 +1,10 @@
 from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import and_, or_, func, cast, Float
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.expression import literal_column
 from app.models.event import EventModel
-from app.models.preferences import UserPreferences
+from app.models.preferences import UserPreferencesBase, LocationPreference
 from app.utils.pagination import PaginationParams
 import logging
 
@@ -16,7 +16,7 @@ class EventService:
     def get_events_by_preferences(
         self,
         db: Session,
-        preferences: UserPreferences,
+        preferences: UserPreferencesBase,
         pagination: PaginationParams,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
@@ -40,9 +40,9 @@ class EventService:
             
             # Apply date filters if provided
             if start_date:
-                query = query.filter(EventModel.start_time >= start_date)
+                query = query.filter(EventModel.start_datetime >= start_date)
             if end_date:
-                query = query.filter(EventModel.start_time <= end_date)
+                query = query.filter(EventModel.start_datetime <= end_date)
             
             # Apply category filters
             if preferences.preferred_categories:
@@ -55,7 +55,7 @@ class EventService:
                 )
             
             # Apply price filters
-            if preferences.max_price < float('inf'):
+            if preferences.max_price is not None:
                 query = query.filter(
                     cast(EventModel.price_info['min_price'], Float) <= preferences.max_price
                 )
@@ -66,26 +66,27 @@ class EventService:
             
             # Apply location filter if provided
             if preferences.preferred_location:
-                max_distance = preferences.preferred_location.get('max_distance_km', 50)
-                lat = preferences.preferred_location['lat']
-                lng = preferences.preferred_location['lng']
+                max_distance = preferences.preferred_location.max_distance
+                lat = preferences.preferred_location.latitude
+                lon = preferences.preferred_location.longitude
                 
-                # Use PostGIS for efficient geo queries
-                distance_filter = func.ST_DWithin(
-                    func.ST_SetSRID(
-                        func.ST_MakePoint(
-                            cast(EventModel.location['lng'], Float),
-                            cast(EventModel.location['lat'], Float)
+                if lat is not None and lon is not None:
+                    # Use PostGIS for efficient geo queries
+                    distance_filter = func.ST_DWithin(
+                        func.ST_SetSRID(
+                            func.ST_MakePoint(
+                                cast(EventModel.venue_lon, Float),
+                                cast(EventModel.venue_lat, Float)
+                            ),
+                            4326
                         ),
-                        4326
-                    ),
-                    func.ST_SetSRID(
-                        func.ST_MakePoint(lng, lat),
-                        4326
-                    ),
-                    max_distance * 1000  # Convert km to meters
-                )
-                query = query.filter(distance_filter)
+                        func.ST_SetSRID(
+                            func.ST_MakePoint(lon, lat),
+                            4326
+                        ),
+                        max_distance * 1000  # Convert km to meters
+                    )
+                    query = query.filter(distance_filter)
             
             # Get total count before pagination
             total_count = query.count()
@@ -96,11 +97,11 @@ class EventService:
             # Add sorting
             if pagination.sort_by == 'start_time':
                 query = query.order_by(
-                    EventModel.start_time.desc() if pagination.sort_desc else EventModel.start_time
+                    EventModel.start_datetime.desc() if pagination.sort_desc else EventModel.start_datetime
                 )
             elif pagination.sort_by == 'popularity':
                 query = query.order_by(
-                    EventModel.popularity_score.desc() if pagination.sort_desc else EventModel.popularity_score
+                    EventModel.rsvp_count.desc() if pagination.sort_desc else EventModel.rsvp_count
                 )
             elif pagination.sort_by == 'price':
                 price_expr = cast(EventModel.price_info['min_price'], Float)
@@ -136,16 +137,16 @@ class EventService:
             
             # Calculate trending score using window functions
             trending_score = (
-                (EventModel.popularity_score * 0.7) +  # Base popularity
-                (1.0 - func.extract('epoch', EventModel.start_time - now) / 
+                (EventModel.rsvp_count * 0.7) +  # Base popularity
+                (1.0 - func.extract('epoch', EventModel.start_datetime - now) / 
                  (timeframe_days * 24 * 3600)) * 0.3  # Time factor
             ).label('trending_score')
             
             # Build query with trending score
             query = db.query(EventModel, trending_score).filter(
                 and_(
-                    EventModel.start_time >= now,
-                    EventModel.start_time <= now + func.make_interval(days=timeframe_days)
+                    EventModel.start_datetime >= now,
+                    EventModel.start_datetime <= now + timedelta(days=timeframe_days)
                 )
             )
             
@@ -206,15 +207,15 @@ class EventService:
                 1.0 - func.ST_Distance(
                     func.ST_SetSRID(
                         func.ST_MakePoint(
-                            cast(EventModel.location['lng'], Float),
-                            cast(EventModel.location['lat'], Float)
+                            cast(EventModel.venue_lon, Float),
+                            cast(EventModel.venue_lat, Float)
                         ),
                         4326
                     ),
                     func.ST_SetSRID(
                         func.ST_MakePoint(
-                            cast(literal_column(str(reference.location['lng'])), Float),
-                            cast(literal_column(str(reference.location['lat'])), Float)
+                            cast(literal_column(str(reference.venue_lon)), Float),
+                            cast(literal_column(str(reference.venue_lat)), Float)
                         ),
                         4326
                     )

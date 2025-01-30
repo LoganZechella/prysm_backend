@@ -103,8 +103,10 @@ class EventCollectionService:
         all_events = []
         
         try:
+            logger.info(f"Starting collection from {source}")
             for location in locations:
                 try:
+                    logger.info(f"Scraping {source} events for location: {location['city']}, {location['state']}")
                     # Scrape events
                     events = await scraper.scrape_events(
                         location=location,
@@ -112,31 +114,48 @@ class EventCollectionService:
                     )
                     
                     if events:
+                        logger.info(f"Found {len(events)} events from {source}")
                         # Process and store events
+                        stored_count = 0
                         for event in events:
-                            await self.store_event(db, event, source)
-                        logger.info(f"Processed {len(events)} events from {source}")
+                            try:
+                                stored = await self.store_event(db, event, source)
+                                if stored:
+                                    stored_count += 1
+                            except Exception as e:
+                                logger.error(f"Error storing individual event from {source}: {str(e)}")
+                                continue
                         
+                        logger.info(f"Successfully stored {stored_count} events from {source}")
                         all_events.extend(events)
+                    else:
+                        logger.warning(f"No events found from {source} for location {location['city']}")
                         
                 except Exception as e:
                     logger.error(f"Error collecting from {source} for location {location}: {str(e)}")
+                    if hasattr(e, '__traceback__'):
+                        import traceback
+                        logger.error(f"Traceback: {''.join(traceback.format_tb(e.__traceback__))}")
                     continue
                     
+            logger.info(f"Completed collection from {source}, total events: {len(all_events)}")
             return all_events
             
         except Exception as e:
-            logger.error(f"Error in collection from {source}: {str(e)}")
+            logger.error(f"Fatal error in collection from {source}: {str(e)}")
+            if hasattr(e, '__traceback__'):
+                import traceback
+                logger.error(f"Traceback: {''.join(traceback.format_tb(e.__traceback__))}")
             return []
     
     def _get_default_location(self) -> Dict[str, Any]:
         """Get default location for searching"""
         return {
-            "city": "San Francisco",
-            "state": "CA",
+            "city": "Louisville",
+            "state": "KY",
             "country": "US",
-            "latitude": 37.7749,
-            "longitude": -122.4194
+            "latitude": 38.2527,
+            "longitude": -85.7585
         }
     
     def _get_default_date_range(self) -> Dict[str, datetime]:
@@ -198,13 +217,48 @@ class EventCollectionService:
                 logger.debug(f"Event {event_id} already exists in database")
                 return None
 
-            # Extract venue and organizer info
+            # Extract venue and organizer info with defaults
             venue = event.get("venue", {})
             if isinstance(venue, str):
                 venue = {"name": venue}
             organizer = event.get("organizer", {})
             if isinstance(organizer, str):
                 organizer = {"name": organizer}
+
+            # Get venue information with defaults
+            venue_name = (
+                event.get("venue_name") or 
+                venue.get("name") or 
+                "Unknown Venue"
+            )
+            venue_lat = float(
+                event.get("venue_lat") or 
+                venue.get("lat") or 
+                venue.get("latitude") or 
+                0.0
+            )
+            venue_lon = float(
+                event.get("venue_lon") or 
+                venue.get("lon") or 
+                venue.get("longitude") or 
+                venue.get("lng") or 
+                0.0
+            )
+            venue_city = (
+                event.get("venue_city") or 
+                venue.get("city") or 
+                "Louisville"
+            )
+            venue_state = (
+                event.get("venue_state") or 
+                venue.get("state") or 
+                "KY"
+            )
+            venue_country = (
+                event.get("venue_country") or 
+                venue.get("country") or 
+                "US"
+            )
 
             # Create new event
             event_model = EventModel(
@@ -216,17 +270,17 @@ class EventCollectionService:
                 end_datetime=event.get("end_time") or event.get("end_datetime"),
                 url=event.get("url"),
                 
-                # Venue information
-                venue_name=venue.get("name"),
-                venue_lat=float(venue.get("lat", 0) or venue.get("latitude", 0)),
-                venue_lon=float(venue.get("lon", 0) or venue.get("longitude", 0)),
-                venue_city=venue.get("city"),
-                venue_state=venue.get("state"),
-                venue_country=venue.get("country"),
+                # Venue information with defaults
+                venue_name=venue_name,
+                venue_lat=venue_lat,
+                venue_lon=venue_lon,
+                venue_city=venue_city,
+                venue_state=venue_state,
+                venue_country=venue_country,
                 
                 # Organizer information
-                organizer_id=organizer.get("id"),
-                organizer_name=organizer.get("name"),
+                organizer_id=organizer.get("id") or event.get("organizer_id"),
+                organizer_name=organizer.get("name") or event.get("organizer_name"),
                 
                 # Event metadata
                 is_online=event.get("is_online", False),

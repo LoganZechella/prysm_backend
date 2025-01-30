@@ -1,10 +1,11 @@
+"""Service for generating event recommendations."""
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 import logging
 from sqlalchemy.orm import Session
-from app.models.event import EventModel  # Changed from Event to EventModel
-from app.models.preferences import UserPreferences
-from app.recommendation.engine import RecommendationEngine
+from app.models.event import EventModel
+from app.models.preferences import UserPreferences, UserPreferencesBase, LocationPreference
+from app.services.recommendation_engine import RecommendationEngine
 from app.services.location_recommendations import LocationService
 from app.services.price_normalization import PriceNormalizer
 from app.services.category_extraction import CategoryExtractor
@@ -18,7 +19,7 @@ class RecommendationService:
     def __init__(self, db: Session):
         """Initialize recommendation service with required components."""
         self.db = db
-        self.recommendation_engine = RecommendationEngine()
+        self.recommendation_engine = RecommendationEngine(db=db)
         self.location_service = LocationService()
         self.price_normalizer = PriceNormalizer()
         self.category_extractor = CategoryExtractor()
@@ -27,7 +28,7 @@ class RecommendationService:
 
     async def get_personalized_recommendations(
         self,
-        preferences: UserPreferences,
+        preferences: UserPreferencesBase,
         pagination: Optional[PaginationParams] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
@@ -79,7 +80,7 @@ class RecommendationService:
             )
             
             # Score and sort events using vectorized operations
-            scored_events = self.recommendation_engine.score_events_batch(events, preferences)
+            scored_events = await self.recommendation_engine.score_events_batch(events, preferences)
             
             # Cache the results
             await self.cache_service.set_recommendations(
@@ -119,13 +120,25 @@ class RecommendationService:
             if pagination is None:
                 pagination = PaginationParams()
             
+            # Create temporary preferences for trending
+            temp_preferences = UserPreferencesBase(
+                user_id='trending',
+                preferred_categories=[],
+                excluded_categories=[],
+                min_price=0.0,
+                max_price=None,
+                preferred_location=None,
+                preferred_days=[],
+                preferred_times=[]
+            )
+            
             # Generate cache key
             cache_key = f"trending:{timeframe_days}:{pagination.page}:{pagination.page_size}"
             
             # Try to get from cache with shorter TTL for trending
             cached = await self.cache_service.get_recommendations(
-                'trending',  # Special user_id for trending
-                UserPreferences(user_id='trending'),  # Empty preferences
+                'trending',
+                temp_preferences,
                 {
                     'type': 'trending',
                     'timeframe_days': timeframe_days,
@@ -145,7 +158,7 @@ class RecommendationService:
             # Cache the results
             await self.cache_service.set_recommendations(
                 'trending',
-                UserPreferences(user_id='trending'),
+                temp_preferences,
                 events,
                 {
                     'type': 'trending',
@@ -238,12 +251,12 @@ class RecommendationService:
                 pagination = PaginationParams()
             
             # Create temporary preferences for the category
-            temp_preferences = UserPreferences(
+            temp_preferences = UserPreferencesBase(
                 user_id=f'category_{category}',
                 preferred_categories=[category],
                 excluded_categories=[],
                 min_price=0.0,
-                max_price=float('inf'),
+                max_price=None,
                 preferred_location=None,
                 preferred_days=[],
                 preferred_times=[]

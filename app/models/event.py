@@ -24,6 +24,8 @@ class EventModel(Base):
     venue_city: Mapped[str] = mapped_column(String)
     venue_state: Mapped[str] = mapped_column(String)
     venue_country: Mapped[str] = mapped_column(String)
+    venue_latitude: Mapped[float] = mapped_column(Float)
+    venue_longitude: Mapped[float] = mapped_column(Float)
     
     # Organizer information
     organizer_id: Mapped[str] = mapped_column(String)

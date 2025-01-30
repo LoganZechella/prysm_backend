@@ -4,6 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from app.config.settings import get_settings
+import os
 
 settings = get_settings()
 
@@ -17,7 +18,7 @@ engine = create_engine(
 
 # Create async engine
 async_engine = create_async_engine(
-    settings.DATABASE_URL.replace('postgresql://', 'postgresql+asyncpg://'),
+    os.getenv('ASYNC_DATABASE_URL', settings.DATABASE_URL.replace('postgresql://', 'postgresql+asyncpg://')),
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20

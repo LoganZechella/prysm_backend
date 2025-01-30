@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     RELOAD: bool = True
     
     # Database
-    DATABASE_URL: str = "sqlite:///./app.db"
+    DATABASE_URL: str = "postgresql://logan@localhost:5432/prysm"
     DATABASE_POOL_SIZE: int = 5
     DATABASE_MAX_OVERFLOW: int = 10
     POSTGRESQL_CONNECTION_URI: Optional[str] = None
@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     NGROK_AUTH_TOKEN: Optional[str] = None
     
     # SuperTokens
-    SUPERTOKENS_CONNECTION_URI: str = "http://localhost:3567"
+    SUPERTOKENS_CONNECTION_URI: str = "postgresql://logan@localhost:5432/prysm"
     SUPERTOKENS_API_DOMAIN: str = "http://localhost:8000"
     SUPERTOKENS_WEBSITE_DOMAIN: str = "http://localhost:3001"
     SUPERTOKENS_API_BASE_PATH: str = "/api/auth"

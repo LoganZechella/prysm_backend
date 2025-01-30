@@ -4,7 +4,8 @@ import logging
 from datetime import datetime, timedelta
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.models.oauth import OAuthToken
 from app.utils.logging import setup_logger
 
@@ -13,7 +14,7 @@ logger = setup_logger(__name__)
 class SpotifyService:
     """Service for handling Spotify OAuth and trait extraction."""
     
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
         self._client = None
         self.scopes = [
@@ -117,174 +118,46 @@ class SpotifyService:
             self._client = None
             return None
     
-    async def extract_user_traits(self, user_id: str) -> Dict[str, Any]:
-        """Extract user traits from Spotify data."""
+    async def get_music_traits(self, user_id: str) -> Dict[str, Any]:
+        """Get music-related traits for a user."""
         try:
             client = await self.get_client(user_id)
             if not client:
                 logger.error(f"Could not get Spotify client for user {user_id}")
                 return {}
                 
-            # Get music traits
-            music_traits = {}
-            try:
-                # Get top tracks for different time ranges
-                ranges = ['short_term', 'medium_term', 'long_term']
-                top_tracks = {}
-                top_artists = {}
-                top_genres = {}
-                
-                for time_range in ranges:
-                    # Get top tracks
-                    tracks = client.current_user_top_tracks(
-                        limit=50,
-                        offset=0,
-                        time_range=time_range
-                    )
-                    top_tracks[time_range] = [
-                        {
-                            'id': track['id'],
-                            'name': track['name'],
-                            'artists': [artist['name'] for artist in track['artists']],
-                            'popularity': track['popularity']
-                        }
-                        for track in tracks['items']
-                    ]
-                    
-                    # Get top artists
-                    artists = client.current_user_top_artists(
-                        limit=50,
-                        offset=0,
-                        time_range=time_range
-                    )
-                    top_artists[time_range] = [
-                        {
-                            'id': artist['id'],
-                            'name': artist['name'],
-                            'genres': artist['genres'],
-                            'popularity': artist['popularity']
-                        }
-                        for artist in artists['items']
-                    ]
-                    
-                    # Aggregate genres
-                    all_genres = []
-                    for artist in artists['items']:
-                        all_genres.extend(artist['genres'])
-                    
-                    from collections import Counter
-                    genre_counts = Counter(all_genres)
-                    top_genres[time_range] = [
-                        {'genre': genre, 'count': count}
-                        for genre, count in genre_counts.most_common(20)
-                    ]
-                
-                music_traits = {
-                    'top_tracks': top_tracks,
-                    'top_artists': top_artists,
-                    'top_genres': top_genres
-                }
-            except Exception as e:
-                logger.error(f"Error extracting music traits: {str(e)}")
-                music_traits = {}
-            
-            # Get social traits
-            social_traits = {}
-            try:
-                # Get user's playlists
-                playlists = client.current_user_playlists()
-                
-                # Get followed artists
-                followed = client.current_user_followed_artists()
-                
-                # Analyze playlist behavior
-                playlist_analysis = {
-                    'total_playlists': playlists['total'] if playlists else 0,
-                    'collaborative_playlists': 0,
-                    'public_playlists': 0,
-                    'avg_tracks_per_playlist': 0,
-                    'total_tracks': 0,
-                    'total_following': 0  # Initialize to 0
-                }
-                
-                # Process playlists
-                if playlists and 'items' in playlists:
-                    for playlist in playlists['items']:
-                        if playlist['collaborative']:
-                            playlist_analysis['collaborative_playlists'] += 1
-                        if playlist['public']:
-                            playlist_analysis['public_playlists'] += 1
-                            
-                        playlist_analysis['total_tracks'] += playlist['tracks']['total']
-                    
-                    if playlists['total'] > 0:
-                        playlist_analysis['avg_tracks_per_playlist'] = (
-                            playlist_analysis['total_tracks'] / playlists['total']
-                        )
-                
-                # Process followed artists
-                if followed and 'artists' in followed:
-                    playlist_analysis['total_following'] = followed['artists']['total']
-                
-                social_traits = {
-                    'playlist_behavior': playlist_analysis
-                }
-            except Exception as e:
-                logger.error(f"Error extracting social traits: {str(e)}")
-                social_traits = {}
-            
-            # Get behavior traits
-            behavior_traits = {}
-            try:
-                # Get recently played tracks
-                recent_tracks = client.current_user_recently_played(limit=50)
-                
-                # Analyze listening patterns
-                from collections import defaultdict
-                import pytz
-                from datetime import timezone
-                
-                time_patterns = defaultdict(int)
-                consecutive_plays = defaultdict(int)
-                last_artist = None
-                
-                for item in recent_tracks['items']:
-                    # Convert timestamp to hour
-                    played_at = datetime.fromisoformat(
-                        item['played_at'].replace('Z', '+00:00')
-                    )
-                    hour = played_at.astimezone(timezone.utc).hour
-                    time_patterns[hour] += 1
-                    
-                    # Track consecutive plays
-                    current_artist = item['track']['artists'][0]['id']
-                    if last_artist == current_artist:
-                        consecutive_plays[current_artist] += 1
-                    last_artist = current_artist
-                
-                # Convert defaultdict to regular dict for JSON serialization
-                behavior_traits = {
-                    'listening_patterns': {
-                        'time_of_day': dict(time_patterns),
-                        'consecutive_plays': dict(consecutive_plays)
-                    }
-                }
-            except Exception as e:
-                logger.error(f"Error extracting behavior traits: {str(e)}")
-                behavior_traits = {}
-            
-            traits = {
-                'music': music_traits,
-                'social': social_traits,
-                'behavior': behavior_traits,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            
-            logger.info(f"Successfully extracted Spotify traits for user {user_id}")
-            return traits
+            return await self._extract_music_traits(client)
             
         except Exception as e:
-            logger.error(f"Error extracting Spotify traits for user {user_id}: {str(e)}")
+            logger.error(f"Error getting music traits: {str(e)}")
+            return {}
+            
+    async def get_social_traits(self, user_id: str) -> Dict[str, Any]:
+        """Get social-related traits for a user."""
+        try:
+            client = await self.get_client(user_id)
+            if not client:
+                logger.error(f"Could not get Spotify client for user {user_id}")
+                return {}
+                
+            return await self._extract_social_traits(client)
+            
+        except Exception as e:
+            logger.error(f"Error getting social traits: {str(e)}")
+            return {}
+            
+    async def get_behavior_traits(self, user_id: str) -> Dict[str, Any]:
+        """Get behavior-related traits for a user."""
+        try:
+            client = await self.get_client(user_id)
+            if not client:
+                logger.error(f"Could not get Spotify client for user {user_id}")
+                return {}
+                
+            return await self._extract_behavior_traits(client)
+            
+        except Exception as e:
+            logger.error(f"Error getting behavior traits: {str(e)}")
             return {}
     
     async def _extract_music_traits(self, client: spotipy.Spotify) -> Dict[str, Any]:
@@ -298,19 +171,33 @@ class SpotifyService:
             
             for time_range in ranges:
                 # Get top tracks
-                tracks = await self.get_top_tracks(limit=50, time_range=time_range)
+                tracks = client.current_user_top_tracks(
+                    limit=50,
+                    offset=0,
+                    time_range=time_range
+                )
                 top_tracks[time_range] = [
                     {
                         'id': track['id'],
                         'name': track['name'],
-                        'artists': [artist['name'] for artist in track['artists']],
+                        'artists': [
+                            {
+                                'id': artist['id'],
+                                'name': artist['name']
+                            }
+                            for artist in track['artists']
+                        ],
                         'popularity': track['popularity']
                     }
                     for track in tracks['items']
                 ] if tracks else []
                 
                 # Get top artists
-                artists = await self.get_top_artists(limit=50, time_range=time_range)
+                artists = client.current_user_top_artists(
+                    limit=50,
+                    offset=0,
+                    time_range=time_range
+                )
                 top_artists[time_range] = [
                     {
                         'id': artist['id'],
@@ -329,17 +216,18 @@ class SpotifyService:
                 
                     from collections import Counter
                     genre_counts = Counter(all_genres)
-                    top_genres[time_range] = [
-                        {'genre': genre, 'count': count}
+                    total_count = sum(genre_counts.values())
+                    top_genres[time_range] = {
+                        genre: count / total_count
                         for genre, count in genre_counts.most_common(20)
-                    ]
+                    }
                 else:
-                    top_genres[time_range] = []
+                    top_genres[time_range] = {}
             
             return {
-                'top_tracks': top_tracks,
-                'top_artists': top_artists,
-                'top_genres': top_genres
+                'genres': top_genres,
+                'artists': top_artists,
+                'tracks': top_tracks
             }
             
         except Exception as e:
@@ -350,8 +238,8 @@ class SpotifyService:
         """Extract social-related traits."""
         try:
             # Get user's playlists and followed artists
-            playlists = await self.get_user_playlists()
-            followed = await self.get_followed_artists()
+            playlists = client.current_user_playlists()
+            followed = client.current_user_followed_artists()
             
             # Analyze playlist behavior
             playlist_analysis = {
@@ -377,8 +265,19 @@ class SpotifyService:
                         playlist_analysis['total_tracks'] / playlists['total']
                     )
             
+            # Calculate social score
+            max_score = 100
+            playlist_score = playlist_analysis['total_playlists'] * 0.3
+            collab_score = playlist_analysis['collaborative_playlists'] * 0.5
+            public_score = playlist_analysis['public_playlists'] * 0.2
+            following_score = playlist_analysis['total_following'] * 0.2
+            
+            raw_score = playlist_score + collab_score + public_score + following_score
+            social_score = min(raw_score, max_score) / max_score
+            
             return {
-                'playlist_behavior': playlist_analysis
+                'playlist_behavior': playlist_analysis,
+                'social_score': social_score
             }
             
         except Exception as e:
@@ -389,7 +288,7 @@ class SpotifyService:
         """Extract behavior-related traits."""
         try:
             # Get recently played tracks
-            recent_tracks = await self.get_recently_played(limit=50)
+            recent_tracks = client.current_user_recently_played(limit=50)
             
             # Analyze listening patterns
             from collections import defaultdict
@@ -399,6 +298,7 @@ class SpotifyService:
             time_patterns = defaultdict(int)
             consecutive_plays = defaultdict(int)
             last_artist = None
+            unique_tracks = set()
             
             if recent_tracks and 'items' in recent_tracks:
                 for item in recent_tracks['items']:
@@ -414,13 +314,23 @@ class SpotifyService:
                     if last_artist == current_artist:
                         consecutive_plays[current_artist] += 1
                     last_artist = current_artist
+                    
+                    # Track unique tracks
+                    unique_tracks.add(item['track']['id'])
             
-            # Convert defaultdict to regular dict for JSON serialization
+            # Calculate discovery ratio
+            total_tracks = len(recent_tracks['items']) if recent_tracks and 'items' in recent_tracks else 0
+            discovery_ratio = len(unique_tracks) / total_tracks if total_tracks > 0 else 0
+            
+            # Calculate engagement level based on listening patterns
+            total_plays = sum(time_patterns.values())
+            engagement_level = min(total_plays / 50, 1.0)  # Normalize to 0-1
+            
             return {
-                'listening_patterns': {
-                    'time_of_day': dict(time_patterns),
-                    'consecutive_plays': dict(consecutive_plays)
-                }
+                'listening_times': dict(time_patterns),
+                'discovery_ratio': discovery_ratio,
+                'engagement_level': engagement_level,
+                'consecutive_plays': dict(consecutive_plays)
             }
             
         except Exception as e:
@@ -431,10 +341,13 @@ class SpotifyService:
         """Get a valid OAuth token for the user."""
         try:
             print(f"\nQuerying database for token (user_id={user_id}, provider=spotify)")
-            token = self.db.query(OAuthToken).filter_by(
-                user_id=user_id,
-                provider="spotify"
-            ).first()
+            result = await self.db.execute(
+                select(OAuthToken).filter_by(
+                    user_id=user_id,
+                    provider="spotify"
+                )
+            )
+            token = result.scalar_one_or_none()
             
             if not token:
                 print(f"No token found for user {user_id}")
@@ -518,7 +431,7 @@ class SpotifyService:
                     seconds=new_token_info['expires_in']
                 )
                 
-                self.db.commit()
+                await self.db.commit()
                 logger.info(f"Successfully refreshed token for user {token.user_id}")
                 logger.info("Updated token details:")
                 logger.info(f"  expires_at: {token.expires_at}")
@@ -622,4 +535,7 @@ class SpotifyService:
             return results
         except Exception as e:
             logger.error(f"Error getting recently played tracks: {str(e)}")
-            return {} 
+            return {}
+    
+    async def close(self):
+        await self.db.close() 

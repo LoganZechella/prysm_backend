@@ -1,6 +1,7 @@
 """Script to create Google OAuth tokens for testing."""
 import os
 import json
+import argparse
 from datetime import datetime, timedelta
 from google_auth_oauthlib.flow import InstalledAppFlow
 from sqlalchemy.orm import Session
@@ -25,12 +26,12 @@ SCOPES = [
     'https://www.googleapis.com/auth/user.addresses.read'
 ]
 
-def create_token(db: Session, user_id: str = "test_user"):
+def create_token(db: Session, user_id: str):
     """Create a new Google OAuth token for testing."""
     logger.info("Creating token with following configuration:")
     logger.info(f"Client ID: {settings.GOOGLE_CLIENT_ID}")
     logger.info(f"Project ID: {settings.GOOGLE_PROJECT_ID}")
-    logger.info(f"Using test user ID: {user_id}")
+    logger.info(f"Using user ID: {user_id}")
     
     client_config = {
         "installed": {
@@ -41,8 +42,7 @@ def create_token(db: Session, user_id: str = "test_user"):
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
             "redirect_uris": [
-                "http://localhost:8000/",
-                "http://127.0.0.1:8000/"
+                "http://localhost:8001/"
             ]
         }
     }
@@ -61,7 +61,7 @@ def create_token(db: Session, user_id: str = "test_user"):
     
     try:
         creds = flow.run_local_server(
-            port=8000,
+            port=8001,
             access_type='offline',
             include_granted_scopes='true',
             prompt='consent',  # Force consent screen to get refresh token
@@ -88,7 +88,7 @@ def create_token(db: Session, user_id: str = "test_user"):
         provider="google",
         client_id=settings.GOOGLE_CLIENT_ID,
         client_secret=settings.GOOGLE_CLIENT_SECRET,
-        redirect_uri="http://localhost:8000/",  # Use the actual redirect URI used in the flow
+        redirect_uri="http://localhost:8001/",  # Use the actual redirect URI used in the flow
         access_token=creds.token,
         refresh_token=creds.refresh_token,
         token_type="Bearer",
@@ -114,6 +114,10 @@ def create_token(db: Session, user_id: str = "test_user"):
 
 def main():
     """Main function."""
+    parser = argparse.ArgumentParser(description="Create Google OAuth token")
+    parser.add_argument("user_id", help="User ID to create token for")
+    args = parser.parse_args()
+
     if not all([
         settings.GOOGLE_CLIENT_ID,
         settings.GOOGLE_CLIENT_SECRET,
@@ -122,13 +126,13 @@ def main():
         print("Error: Missing Google OAuth configuration in .env file")
         return
 
-    print("\nUsing default test user ID: 'test_user'")
+    print(f"\nCreating token for user ID: {args.user_id}")
     print("This ID will be used to store your Google OAuth token in the database.")
     input("Press Enter to continue or Ctrl+C to cancel...")
 
     db = SessionLocal()
     try:
-        create_token(db)
+        create_token(db, args.user_id)
     finally:
         db.close()
 

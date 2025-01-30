@@ -3,13 +3,13 @@ Meetup scraper implementation using Scrapfly.
 """
 
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import json
-from scrapfly import ScrapeConfig, ScrapflyClient
-import time
-from urllib.parse import urlencode
+from bs4 import BeautifulSoup
 import re
+from scrapfly import ScrapeConfig, ScrapflyClient
+from urllib.parse import urlencode
 
 from app.scrapers.base import ScrapflyBaseScraper, ScrapflyError
 from app.utils.retry_handler import RetryError
@@ -21,139 +21,71 @@ class MeetupScrapflyScraper(ScrapflyBaseScraper):
     def __init__(self, api_key: str, **kwargs):
         """Initialize the Meetup scraper"""
         super().__init__(api_key=api_key, platform='meetup', **kwargs)
-        self.base_url = "https://www.meetup.com/find/"
+        self.base_url = "https://www.meetup.com/find"
         self.logger = logging.getLogger(__name__)
-        
-    def _build_events_url(self, location: str = "Louisville", limit: int = 10) -> str:
-        """Build the Meetup events URL with query parameters"""
-        params = {
-            'location': location,
-            'source': 'EVENTS',
-            'dateRange': 'this_week',
-            'eventType': 'in-person',
-            'pageSize': str(limit)
-        }
-        return f"{self.base_url}?{urlencode(params)}"
-
-    async def extract_events(self, html_content: str) -> List[EventModel]:
-        """Extract events from the HTML content."""
-        self.logger.info(f"HTML content preview: {html_content[:2000]}")
-        
-        # Count script tags for debugging
-        script_tags = re.findall(r'<script[^>]*>.*?</script>', html_content, re.DOTALL)
-        self.logger.info(f"Found {len(script_tags)} script tags")
-        
-        # Try different patterns to find the data
-        patterns = {
-            'initial_state': r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
-            'preloaded_state': r'window\.__PRELOADED_STATE__\s*=\s*({.*?});',
-            'events_array': r'"events":\s*(\[.*?\])',
-            'search_results': r'"searchResults":\s*({.*?})',
-            'next_data': r'<script[^>]*type="application/json"[^>]*>(.*?)</script>'
-        }
-        
-        events = []
-        for pattern_name, pattern in patterns.items():
-            matches = re.findall(pattern, html_content, re.DOTALL)
-            self.logger.info(f"Pattern '{pattern}' found {len(matches)} matches")
+        self.default_city = "Louisville"
+        self.default_state = "KY"
+        self.default_country = "US"
+    
+    async def _make_request(self, url: str) -> Optional[BeautifulSoup]:
+        """Make a request to Meetup and return BeautifulSoup object"""
+        try:
+            self.logger.debug(f"[meetup] Making request to: {url}")
+            config = await self._get_request_config(url)
+            result = await self.client.async_scrape(ScrapeConfig(**config))
             
-            if matches:
-                for match in matches:
-                    try:
-                        data = json.loads(match)
-                        self.logger.info(f"Successfully parsed JSON data with keys: {list(data.keys())}")
-                        
-                        if pattern_name == 'next_data':
-                            self.logger.info("Found Next.js data, attempting to parse")
-                            
-                            if 'props' in data:
-                                props = data['props']
-                                self.logger.info(f"Props keys: {list(props.keys())}")
-                                
-                                if 'pageProps' in props:
-                                    page_props = props['pageProps']
-                                    self.logger.info(f"PageProps keys: {list(page_props.keys())}")
-                                    
-                                    if '__APOLLO_STATE__' in page_props:
-                                        apollo_state = page_props['__APOLLO_STATE__']
-                                        self.logger.info(f"Apollo state keys: {list(apollo_state.keys())}")
-                                        
-                                        # Extract events from Apollo state
-                                        for key, value in apollo_state.items():
-                                            if isinstance(value, dict) and value.get('__typename') == 'Event':
-                                                try:
-                                                    # Extract basic event info
-                                                    event_id = value.get('id')
-                                                    title = value.get('title')
-                                                    description = value.get('description')
-                                                    start_time = value.get('dateTime')
-                                                    event_url = value.get('eventUrl')
-                                                    is_online = value.get('isOnline', False)
-                                                    rsvp_count = value.get('rsvps', {}).get('totalCount', 0)
-                                                    
-                                                    # Skip online events
-                                                    if is_online:
-                                                        continue
-                                                        
-                                                    if not all([event_id, title, start_time]):
-                                                        self.logger.warning(f"Skipping event due to missing required fields: {event_id}")
-                                                        continue
-                                                    
-                                                    # Get venue info
-                                                    venue_ref = value.get('venue', {}).get('__ref')
-                                                    venue = apollo_state.get(venue_ref, {})
-                                                    
-                                                    # Get group info
-                                                    group_ref = value.get('group', {}).get('__ref')
-                                                    group = apollo_state.get(group_ref, {})
-                                                    
-                                                    # Create event model
-                                                    event = EventModel(
-                                                        platform_id=event_id,
-                                                        title=title,
-                                                        description=description or '',
-                                                        start_datetime=datetime.fromisoformat(start_time.replace('Z', '+00:00')),
-                                                        url=event_url or '',
-                                                        venue_name=venue.get('name', ''),
-                                                        venue_lat=venue.get('lat'),
-                                                        venue_lon=venue.get('lon'),
-                                                        venue_city=venue.get('city', ''),
-                                                        venue_state=venue.get('state', ''),
-                                                        venue_country=venue.get('country', ''),
-                                                        organizer_name=group.get('name', ''),
-                                                        organizer_id=group.get('id', ''),
-                                                        rsvp_count=rsvp_count,
-                                                        is_online=is_online,
-                                                        platform='meetup'
-                                                    )
-                                                    events.append(event)
-                                                    self.logger.info(f"Successfully extracted event: {title}")
-                                                    
-                                                except Exception as e:
-                                                    self.logger.error(f"Error processing event {event_id}: {str(e)}")
-                                                    continue
-                                                    
-                                    else:
-                                        self.logger.warning("No Apollo state found in pageProps")
-                                else:
-                                    self.logger.warning("No pageProps found in props")
-                            else:
-                                self.logger.warning("No props found in Next.js data")
-                                
-                    except json.JSONDecodeError as e:
-                        self.logger.error(f"Failed to parse JSON data: {e}")
-                    except Exception as e:
-                        self.logger.error(f"Error processing match: {e}")
+            if not result.success:
+                self.logger.error(f"[meetup] Request failed: {result.error}")
+                return None
+            
+            # Log response details
+            self.logger.debug(f"[meetup] Response status code: {result.status_code}")
+            self.logger.debug(f"[meetup] Response headers: {result.headers}")
+            self.logger.debug(f"[meetup] Response content length: {len(result.content)}")
+            
+            # Parse HTML and log structure
+            soup = BeautifulSoup(result.content, 'html.parser')
+            self.logger.debug(f"[meetup] HTML title: {soup.title.string if soup.title else 'No title'}")
+            self.logger.debug(f"[meetup] Found elements: {[tag.name for tag in soup.find_all()][:10]}")  # First 10 elements
+            
+            return soup
+            
+        except Exception as e:
+            self.logger.error(f"[meetup] Request error: {str(e)}")
+            return None
+    
+    async def _get_request_config(self, url: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Get Meetup-specific Scrapfly configuration"""
+        base_config = await super()._get_request_config(url, config)
         
-        self.logger.info(f"Successfully extracted {len(events)} events")
-        return events
-
+        # Add Meetup-specific settings
+        meetup_config = {
+            'url': url,
+            'render_js': True,  # Meetup requires JavaScript
+            'asp': True,
+            'country': 'us',
+            'headers': {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+            }
+        }
+        
+        return {**base_config, **meetup_config}
+    
     async def scrape_events(
         self,
         location: Dict[str, Any],
         date_range: Dict[str, datetime],
-        categories: Optional[List[str]] = None,
-        page: int = 1
+        categories: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Scrape events from Meetup.
@@ -162,216 +94,245 @@ class MeetupScrapflyScraper(ScrapflyBaseScraper):
             location: Dictionary with city, state, country, latitude, longitude
             date_range: Dictionary with start and end datetime
             categories: Optional list of category strings
-            page: Page number for pagination
             
         Returns:
             List of event dictionaries
         """
+        events = []
+        page = 1
+        max_pages = 10  # Limit to prevent infinite loops
+        
         try:
-            # Build GraphQL query URL and parameters
-            url, query = self._build_search_url(location, date_range, categories, page)
-            self.logger.info(f"Scraping Meetup events from URL: {url}")
-            
-            config = ScrapeConfig(
-                url=url,
-                method='POST',
-                body=json.dumps(query),
-                headers={
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            )
-            
-            result = await self.client.async_scrape(config)
-            
-            if not result or not result.content:
-                raise ScrapflyError("Empty response from Scrapfly")
+            while page <= max_pages:
+                # Build URL for the current page
+                url = self._build_search_url(location, date_range, categories, page)
+                self.logger.info(f"[meetup] Scraping page {page}: {url}")
                 
-            # Parse response
-            response_data = json.loads(result.content)
-            if 'data' not in response_data or 'result' not in response_data['data']:
-                raise ScrapflyError("Invalid response format")
+                # Make request
+                soup = await self._make_request(url)
+                if not soup:
+                    self.logger.error("[meetup] Failed to get page content")
+                    break
                 
-            # Extract events from GraphQL response
-            events = self._parse_graphql_events(response_data['data']['result'])
-            self.logger.info(f"Successfully extracted {len(events)} events")
+                # Parse events from the page
+                new_events = self._parse_html(soup)
+                self.logger.debug(f"[meetup] Found {len(new_events)} events on page {page}")
+                
+                if not new_events:
+                    self.logger.info("[meetup] No more events found")
+                    break
+                
+                events.extend(new_events)
+                
+                # Check for next page
+                if not self._has_next_page(soup):
+                    break
+                
+                page += 1
             
+            self.logger.info(f"[meetup] Total events found: {len(events)}")
             return events
             
         except Exception as e:
-            self.logger.error(f"Error scraping events: {str(e)}")
+            self.logger.error(f"[meetup] Error scraping events: {str(e)}")
             raise ScrapflyError(f"Failed to scrape events: {str(e)}")
-
+    
     def _build_search_url(
         self,
         location: Dict[str, Any],
         date_range: Dict[str, datetime],
         categories: Optional[List[str]],
-        page: int
-    ) -> tuple[str, dict]:
-        """Build the Meetup GraphQL API endpoint and query"""
-        base_url = "https://www.meetup.com/gql"
+        page: int = 1
+    ) -> str:
+        """Build the Meetup search URL with parameters"""
+        # Format location
+        location_str = f"{location['city'].lower()}-{location['state'].lower()}"
         
-        # Format location string
-        location_str = f"{location['country'].lower()}--{location['state'].lower()}--{location['city'].lower().replace(' ', '-')}"
+        # Calculate date range
+        days_ahead = (date_range['end'] - date_range['start']).days
+        date_range_str = 'upcoming' if days_ahead <= 7 else 'upcoming'
         
-        # Build GraphQL query
-        query = {
-            "operationName": "SearchEvents",
-            "variables": {
-                "first": 20,
-                "after": f"{(page - 1) * 20}" if page > 1 else None,
-                "location": location_str,
-                "source": "EVENTS",
-                "startDate": date_range['start'].isoformat(),
-                "endDate": date_range['end'].isoformat(),
-                "categories": self._map_categories(categories) if categories else None
-            },
-            "query": """
-                query SearchEvents(
-                    $first: Int!,
-                    $after: String,
-                    $location: String!,
-                    $source: String,
-                    $startDate: String,
-                    $endDate: String,
-                    $categories: [String]
-                ) {
-                    result: searchEvents(
-                        input: {
-                            first: $first,
-                            after: $after,
-                            location: $location,
-                            source: $source,
-                            startDate: $startDate,
-                            endDate: $endDate,
-                            categories: $categories
-                        }
-                    ) {
-                        pageInfo {
-                            hasNextPage
-                            endCursor
-                        }
-                        totalCount
-                        edges {
-                            node {
-                                id
-                                title
-                                description
-                                dateTime
-                                eventType
-                                eventUrl
-                                isOnline
-                                maxTickets
-                                rsvps {
-                                    totalCount
-                                }
-                                venue {
-                                    id
-                                    name
-                                    lat
-                                    lon
-                                    city
-                                    state
-                                    country
-                                }
-                                group {
-                                    id
-                                    name
-                                    urlname
-                                    timezone
-                                }
-                                featuredEventPhoto {
-                                    baseUrl
-                                    highResUrl
-                                }
-                            }
-                        }
-                    }
-                }
-            """
+        # Build query parameters
+        params = {
+            'keywords': '',
+            'location': location_str,
+            'source': 'EVENTS',
+            'distance': 'twentyFiveMiles',
+            'page': str(page)
         }
         
-        return base_url, query
-
-    def _map_categories(self, categories: List[str]) -> List[str]:
-        """Map our category names to Meetup category IDs"""
-        category_map = {
-            "tech": ["tech"],
-            "business": ["career", "business"],
-            "social": ["community", "hobbies"],
-            "education": ["education", "learning"],
-            "arts": ["arts", "culture"],
-            "music": ["music", "performing-arts"],
-            "outdoors": ["outdoors", "adventure"],
-            "sports": ["sports", "fitness"],
-            "food": ["food", "drink"],
-            "games": ["games", "fun"],
-            "language": ["language", "culture"],
-            "pets": ["pets", "animals"],
-            "photography": ["photography", "arts"],
-            "writing": ["writing", "book-clubs"],
-            "fashion": ["fashion", "style"],
-            "film": ["film", "movies"],
-            "dance": ["dance", "movement"],
-            "family": ["family", "parents"],
-            "health": ["health", "wellness"],
-            "science": ["science", "technology"]
-        }
+        # Add categories if provided
+        if categories:
+            params['topics'] = ','.join(self._map_categories(categories))
         
-        mapped_categories = []
-        for category in categories:
-            if category.lower() in category_map:
-                mapped_categories.extend(category_map[category.lower()])
-        return list(set(mapped_categories))  # Remove duplicates
-
-    def _parse_graphql_events(self, search_results: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Parse events from GraphQL response"""
+        # Build final URL
+        url = f"{self.base_url}/events"
+        if params:
+            url += f"?{urlencode(params)}"
+        
+        self.logger.debug(f"[meetup] Built URL: {url}")
+        return url
+    
+    def _parse_html(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
+        """Parse events from Meetup HTML"""
         events = []
         
-        for edge in search_results.get('edges', []):
-            node = edge.get('node', {})
-            if not node:
-                continue
+        # Log the HTML structure we're searching through
+        self.logger.debug("[meetup] Starting HTML parsing")
+        self.logger.debug(f"[meetup] HTML classes found: {[cls for tag in soup.find_all() for cls in tag.get('class', [])][:20]}")
+        
+        # Try multiple selectors for event cards
+        event_cards = soup.find_all("div", {"data-testid": "event-card"})
+        if not event_cards:
+            self.logger.debug("[meetup] No events found with 'event-card' data-testid, trying alternate selectors")
+            event_cards = soup.find_all("div", class_=lambda x: x and any(cls in x for cls in ["event-card", "eventCard"]))
+            if not event_cards:
+                self.logger.debug("[meetup] No events found with alternate selectors")
+                event_cards = soup.find_all("div", class_=lambda x: x and "group-card" in x)
+        
+        self.logger.debug(f"[meetup] Found {len(event_cards)} event cards")
+        
+        # Log the first card's structure if any found
+        if event_cards:
+            first_card = event_cards[0]
+            self.logger.debug(f"[meetup] First card classes: {first_card.get('class')}")
+            self.logger.debug(f"[meetup] First card structure: {[child.name for child in first_card.children if child.name]}")
+            self.logger.debug(f"[meetup] First card HTML: {first_card}")
+        
+        for i, card in enumerate(event_cards):
+            try:
+                self.logger.debug(f"[meetup] Processing card {i+1}")
                 
-            # Skip online events
-            if node.get('isOnline', False):
-                continue
+                # Extract title and URL with detailed logging
+                title_elem = card.find("a", {"class": "eventCard--link"})
+                if not title_elem:
+                    self.logger.debug(f"[meetup] Card {i+1}: No title element found with 'eventCard--link' class")
+                    title_elem = card.find("a", {"data-testid": "event-card-link"})
+                    if not title_elem:
+                        self.logger.debug(f"[meetup] Card {i+1}: No title element found with alternate selector")
+                        continue
                 
-            # Get venue info
-            venue = node.get('venue', {})
-            
-            # Get group info
-            group = node.get('group', {})
-            
-            # Get photo info
-            photo = node.get('featuredEventPhoto', {})
-            
-            event = {
-                'id': node.get('id'),
-                'title': node.get('title'),
-                'description': node.get('description', ''),
-                'start_time': node.get('dateTime'),
-                'url': node.get('eventUrl', ''),
-                'venue': {
-                    'name': venue.get('name', ''),
-                    'lat': venue.get('lat'),
-                    'lon': venue.get('lon'),
-                    'city': venue.get('city', ''),
-                    'state': venue.get('state', ''),
-                    'country': venue.get('country', '')
-                },
-                'organizer': {
-                    'id': group.get('id', ''),
-                    'name': group.get('name', '')
-                },
-                'is_online': node.get('isOnline', False),
-                'rsvp_count': node.get('rsvps', {}).get('totalCount', 0),
-                'image_url': photo.get('highResUrl') or photo.get('baseUrl', ''),
-                'categories': []  # We'll need to map these from the group's categories
-            }
-            
-            events.append(event)
-            
-        return events 
+                title = title_elem.get_text(strip=True)
+                url = title_elem.get("href")
+                self.logger.debug(f"[meetup] Card {i+1}: Found title: {title}")
+                self.logger.debug(f"[meetup] Card {i+1}: Found URL: {url}")
+                
+                if not url.startswith("http"):
+                    url = f"https://www.meetup.com{url}"
+                
+                # Extract date with detailed logging
+                date_elem = card.find("time")
+                if not date_elem:
+                    self.logger.debug(f"[meetup] Card {i+1}: No date element found")
+                    continue
+                
+                try:
+                    datetime_str = date_elem.get("datetime")
+                    self.logger.debug(f"[meetup] Card {i+1}: Found datetime string: {datetime_str}")
+                    start_time = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+                    self.logger.debug(f"[meetup] Card {i+1}: Parsed datetime: {start_time}")
+                except (ValueError, AttributeError) as e:
+                    self.logger.warning(f"[meetup] Card {i+1}: Could not parse date for event: {title}. Error: {str(e)}")
+                    continue
+                
+                # Rest of the parsing with debug logging
+                venue_elem = card.find("p", {"class": "venueDisplay"})
+                if not venue_elem:
+                    self.logger.debug(f"[meetup] Card {i+1}: No venue element found with 'venueDisplay' class")
+                    venue_elem = card.find("div", {"data-testid": "venue-info"})
+                
+                venue_name = "Online Event"
+                venue_city = location.get('city', self.default_city)
+                venue_state = location.get('state', self.default_state)
+                venue_country = location.get('country', self.default_country)
+                is_online = True
+                
+                if venue_elem:
+                    venue_text = venue_elem.get_text(strip=True)
+                    self.logger.debug(f"[meetup] Card {i+1}: Found venue text: {venue_text}")
+                    if venue_text and 'online' not in venue_text.lower():
+                        venue_name = venue_text
+                        is_online = False
+                
+                # Extract group name (organizer)
+                group_elem = card.find("p", {"class": "groupName"})
+                group_name = group_elem.get_text(strip=True) if group_elem else ""
+                
+                # Extract RSVP count
+                rsvp_elem = card.find("p", {"class": "attendanceCount"})
+                rsvp_count = 0
+                if rsvp_elem:
+                    rsvp_text = rsvp_elem.get_text(strip=True)
+                    try:
+                        rsvp_count = int(re.search(r'\d+', rsvp_text).group())
+                    except (AttributeError, ValueError):
+                        pass
+                
+                # Create and append event with all gathered data
+                event = {
+                    "platform_id": url.split('/')[-1],
+                    "title": title,
+                    "description": "",  # Need to fetch event page for full description
+                    "start_datetime": start_time,
+                    "end_datetime": start_time + timedelta(hours=2),  # Default duration
+                    "url": url,
+                    "venue_name": venue_name,
+                    "venue_city": venue_city,
+                    "venue_state": venue_state,
+                    "venue_country": venue_country,
+                    "organizer_name": group_name,
+                    "organizer_id": "",
+                    "platform": "meetup",
+                    "is_online": is_online,
+                    "rsvp_count": rsvp_count,
+                    "categories": []
+                }
+                
+                events.append(event)
+                self.logger.debug(f"[meetup] Successfully parsed event: {title}")
+                
+            except Exception as e:
+                self.logger.error(f"[meetup] Error parsing event card {i+1}: {str(e)}")
+                if hasattr(e, '__traceback__'):
+                    import traceback
+                    self.logger.error(f"Traceback: {''.join(traceback.format_tb(e.__traceback__))}")
+                continue
+        
+        self.logger.info(f"[meetup] Successfully parsed {len(events)} events from {len(event_cards)} cards")
+        return events
+    
+    def _has_next_page(self, soup: BeautifulSoup) -> bool:
+        """Check if there's a next page of results"""
+        next_button = soup.find("button", {"aria-label": "Next page"})
+        return next_button is not None and not next_button.get("disabled")
+    
+    def _map_categories(self, categories: List[str]) -> List[str]:
+        """Map generic categories to Meetup category IDs"""
+        category_mapping = {
+            "music": "music",
+            "nightlife": "nightlife",
+            "arts": "arts",
+            "food": "food-and-drink",
+            "sports": "sports-and-fitness",
+            "fitness": "health-and-wellness",
+            "charity": "community",
+            "community": "community",
+            "family": "family",
+            "education": "education",
+            "business": "career-and-business",
+            "tech": "tech",
+            "games": "games",
+            "language": "language-and-culture",
+            "social": "socializing",
+            "outdoors": "outdoors-and-adventure"
+        }
+        
+        mapped = []
+        for cat in categories:
+            cat_lower = cat.lower()
+            if cat_lower in category_mapping:
+                mapped.append(category_mapping[cat_lower])
+            else:
+                self.logger.warning(f"[meetup] Unknown category: {cat}")
+        
+        return mapped 
