@@ -9,9 +9,9 @@ from app.core.config import settings
 
 # Initialize Redis client
 redis_client = Redis(
-    host=settings.REDIS_HOST,
-    port=settings.REDIS_PORT,
-    db=settings.REDIS_DB,
+    host="localhost",
+    port=6379,
+    db=0,
     decode_responses=True,
     socket_timeout=5,
     retry_on_timeout=True

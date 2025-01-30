@@ -28,48 +28,76 @@ class LocationService:
             timeout=GEOCODER_TIMEOUT
         )
         
-    @lru_cache(maxsize=1000)
-    def geocode_venue(self, venue_name: str, city: str, state: str, country: str = DEFAULT_COUNTRY) -> Optional[Dict[str, float]]:
+    def _geocode_venue_uncached(self, venue_key: str, address: Dict[str, str]) -> Optional[Tuple[float, float]]:
         """
-        Geocode a venue address to get coordinates.
-        
-        Args:
-            venue_name: Name of the venue
-            city: City name
-            state: State name
-            country: Country code (default: US)
-            
-        Returns:
-            Dictionary with latitude and longitude if found
+        Internal method to geocode a venue address without caching.
         """
         try:
-            # Build address string
-            address = f"{venue_name}, {city}, {state}, {country}"
+            # Validate inputs
+            if not isinstance(venue_key, str) or not isinstance(address, dict):
+                logger.error(f"Invalid input types: venue_key={type(venue_key)}, address={type(address)}")
+                return None
+
+            if not venue_key.strip():
+                logger.warning("Empty venue key provided")
+                return None
+
+            if not address.get('city') or not address.get('country'):
+                logger.warning(f"Incomplete address for venue: {venue_key}, missing city or country")
+                return None
+            
+            # Build address string from components
+            address_parts = [
+                venue_key.split('|')[0],  # venue name is first part
+                address.get('city', ''),
+                address.get('state', ''),
+                address.get('country', '')
+            ]
+            address_str = ', '.join(part.strip() for part in address_parts if part.strip())
             
             # Try geocoding with exponential backoff
             for attempt in range(MAX_RETRIES):
                 try:
-                    location = self.geolocator.geocode(address)
-                    if location:
-                        return {
-                            "lat": location.latitude,
-                            "lon": location.longitude,
-                            "lng": location.longitude  # Add lng for compatibility
-                        }
+                    location = self.geolocator.geocode(address_str)
+                    if location and hasattr(location, 'latitude') and hasattr(location, 'longitude'):
+                        return (location.latitude, location.longitude)
+                    logger.warning(f"No location found for address: {address_str}")
                     break
                 except (GeocoderTimedOut, GeocoderUnavailable) as e:
                     if attempt == MAX_RETRIES - 1:  # Last attempt
-                        logger.error(f"Error geocoding venue {venue_name}: {str(e)}")
+                        logger.error(f"Error geocoding venue {venue_key}: {str(e)}")
                         return None
                     wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 seconds
                     time.sleep(wait_time)
                     continue
+                except Exception as e:
+                    logger.error(f"Unexpected error geocoding venue {venue_key}: {str(e)}")
+                    return None
                     
-            logger.warning(f"Could not geocode venue: {address}")
             return None
             
         except Exception as e:
-            logger.error(f"Error geocoding venue {venue_name}: {str(e)}")
+            logger.error(f"Error geocoding venue {venue_key}: {str(e)}")
+            return None
+
+    @lru_cache(maxsize=1000)
+    def geocode_venue(self, venue_key: str, address_str: str) -> Optional[Tuple[float, float]]:
+        """
+        Cached wrapper for geocoding a venue address.
+        
+        Args:
+            venue_key: A unique string key identifying the venue (e.g. "venue_name|city|state|country")
+            address_str: JSON string representation of the address dictionary
+            
+        Returns:
+            Tuple with latitude and longitude if found
+        """
+        try:
+            import json
+            address = json.loads(address_str)
+            return self._geocode_venue_uncached(venue_key, address)
+        except Exception as e:
+            logger.error(f"Error in cached geocode_venue: {str(e)}")
             return None
             
     def calculate_distance(

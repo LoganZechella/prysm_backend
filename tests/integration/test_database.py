@@ -2,7 +2,11 @@ import pytest
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from app.database.models import Base, User, EventModel, UserProfile, EventScore
+from app.database import Base
+from app.models.user import User
+from app.models.event import EventModel
+from app.models.profile import UserProfile
+from app.models.event_score import EventScore
 from app.database.connection import get_db_session
 from app.config import get_settings
 from sqlalchemy.exc import IntegrityError

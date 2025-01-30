@@ -28,13 +28,9 @@ def verify_app_connection():
 def verify_supertokens_connection():
     """Verify SuperTokens database connection."""
     try:
-        # SuperTokens uses host.docker.internal from within Docker
-        db_url = os.getenv("POSTGRESQL_CONNECTION_URI", "postgresql://logan@host.docker.internal:5432/prysm")
+        db_url = os.getenv("POSTGRESQL_CONNECTION_URI", "postgresql://logan@localhost:5432/prysm")
         
-        # For testing, we'll use localhost since we're not in Docker
-        test_url = db_url.replace("host.docker.internal", "localhost")
-        
-        conn = psycopg2.connect(test_url)
+        conn = psycopg2.connect(db_url)
         cur = conn.cursor()
         cur.execute("SELECT version();")
         version = cur.fetchone()[0]

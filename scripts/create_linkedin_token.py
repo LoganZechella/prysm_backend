@@ -21,28 +21,31 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+# Get credentials from environment variables
+CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID")
+REDIRECT_URI = os.getenv("LINKEDIN_REDIRECT_URI")
+
+if not CLIENT_ID or not REDIRECT_URI:
+    raise ValueError("LinkedIn credentials not found in environment variables. Please check your .env file.")
+
 async def create_token(user_id: str = "test_user"):
     """Create a LinkedIn OAuth token."""
     try:
-        client_id = os.getenv("LINKEDIN_CLIENT_ID")
-        redirect_uri = os.getenv("LINKEDIN_REDIRECT_URI")
-        
         logger.info("Creating token with following configuration:")
-        logger.info(f"Client ID: {client_id}")
-        logger.info(f"Redirect URI: {redirect_uri}")
+        logger.info(f"Client ID: {CLIENT_ID}")
+        logger.info(f"Redirect URI: {REDIRECT_URI}")
         logger.info(f"Using test user ID: {user_id}")
 
         # Generate state for CSRF protection
         state = secrets.token_urlsafe(32)
         
         # Construct LinkedIn authorization URL with required scopes
-        # Using scopes as shown in LinkedIn Developer Console
         params = {
             "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
+            "client_id": CLIENT_ID,
+            "redirect_uri": REDIRECT_URI,
             "state": state,
-            "scope": "openid profile email"  # Use authorized scopes from Developer Console
+            "scope": "profile"  # Use only the profile scope that we have authorized
         }
         
         auth_url = f"https://www.linkedin.com/oauth/v2/authorization?{urlencode(params)}"

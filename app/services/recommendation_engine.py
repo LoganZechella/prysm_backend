@@ -3,17 +3,23 @@
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime, timedelta
 import logging
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_, or_, func, text
+from sqlalchemy.sql import Select
 from app.models.event import EventModel
+from app.models.traits import Traits
+from app.models.preferences import UserPreferences, UserPreferencesBase, LocationPreference
 from app.services.location_recommendations import LocationService
 from app.utils.deduplication import calculate_title_similarity
+from app.utils.logging import setup_logger
+import json
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 class RecommendationEngine:
     """Engine for generating personalized event recommendations."""
     
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         """Initialize recommendation engine."""
         self.db = db
         self.default_max_distance = 50.0  # km
@@ -24,250 +30,322 @@ class RecommendationEngine:
     async def get_recommendations(
         self,
         user_id: str,
-        user_location: Dict[str, Any],
+        user_location: Optional[Dict[str, Any]] = None,
         preferences: Optional[Dict[str, Any]] = None,
-        max_distance: Optional[float] = None,
-        max_results: Optional[int] = None
-    ) -> List[EventModel]:
-        """
-        Get personalized event recommendations for a user.
-        
-        Args:
-            user_id: User ID
-            user_location: User's location (lat/lon or address)
-            preferences: Optional user preferences
-            max_distance: Optional maximum distance in km
-            max_results: Optional maximum number of results
-            
-        Returns:
-            List of recommended events
-        """
+        max_results: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Get recommendations for a user."""
         try:
-            # Get base query for upcoming events
-            base_query = self.db.query(EventModel).filter(
-                EventModel.start_datetime >= datetime.utcnow()
+            # Get user traits
+            traits = await self.db.execute(
+                select(Traits).filter_by(user_id=user_id)
+            )
+            traits = traits.scalar_one_or_none()
+            
+            # Get candidate events
+            events = await self._get_candidate_events(
+                categories=preferences.get("categories", []) if preferences else [],
+                location=user_location,
+                max_distance=preferences.get("max_distance", 50) if preferences else 50,
+                max_price=preferences.get("max_price") if preferences else None
             )
             
-            # Apply location filter
-            events = base_query.all()
-            max_dist = max_distance or self.default_max_distance
-            
-            # Get user coordinates if needed
-            user_coords = self.location_service.get_coordinates(user_location)
-            if not user_coords:
-                logger.error(f"Could not get coordinates for user location: {user_location}")
+            if not events:
+                logger.warning("No candidate events found")
                 return []
                 
-            filtered_events = self.location_service.filter_by_distance(events, user_coords, max_dist)
-            
-            # Apply preference filters if provided
-            if preferences:
-                filtered_events = self._apply_preferences(filtered_events, preferences)
-            
-            # Sort by relevance score
-            scored_events = self._score_events(filtered_events, user_coords, preferences)
+            # Score events
+            scored_events = []
+            for event in events:
+                try:
+                    score = await self._score_event(event, preferences)
+                    scored_events.append({
+                        "id": str(event.id),
+                        "title": event.title,
+                        "description": event.description,
+                        "start_datetime": event.start_datetime,
+                        "end_datetime": event.end_datetime,
+                        "venue_name": event.venue_name,
+                        "venue_city": event.venue_city,
+                        "venue_state": event.venue_state,
+                        "venue_country": event.venue_country,
+                        "venue_latitude": event.venue_latitude,
+                        "venue_longitude": event.venue_longitude,
+                        "categories": event.categories,
+                        "url": event.url,
+                        "relevance_score": score
+                    })
+                except Exception as e:
+                    logger.error(f"Error scoring event {event.id}: {str(e)}")
+                    continue
+                    
+            # Sort by score
+            scored_events.sort(key=lambda x: x["relevance_score"], reverse=True)
             
             # Return top N results
-            max_res = max_results or self.default_max_results
-            return scored_events[:max_res]
+            return scored_events[:max_results]
             
         except Exception as e:
             logger.error(f"Error getting recommendations: {str(e)}")
-            raise
+            return []
             
-    def _score_events(
+    async def _get_candidate_events(
         self,
-        events: List[Dict[str, Any]],
-        user_location: Dict[str, float],
-        preferences: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """Score events based on relevance to user."""
-        scored_events = []
-        for event in events:
-            score = self._calculate_event_score(event, user_location, preferences)
-            event["relevance_score"] = score
-            scored_events.append(event)
-            
-        return sorted(scored_events, key=lambda x: x["relevance_score"], reverse=True)
-        
-    def _calculate_event_score(
-        self,
-        event: Dict[str, Any],
-        user_location: Dict[str, float],
-        preferences: Optional[Dict[str, Any]] = None
-    ) -> float:
-        """Calculate relevance score for an event."""
-        score = 0.0
-        weights = {
-            "distance": 0.4,
-            "category": 0.3,
-            "price": 0.2,
-            "popularity": 0.1
-        }
-        
-        # Distance score (inverse relationship)
-        venue_coords = self.location_service._get_event_coordinates(event)
-        if venue_coords and all(venue_coords.values()):
-            distance = self.location_service.calculate_distance(user_location, venue_coords)
-            max_dist = self.default_max_distance
-            distance_score = max(0, 1 - (distance / max_dist))
-            score += weights["distance"] * distance_score
-            
-        # Add other scoring components based on preferences
-        if preferences:
-            # Category match
-            if "preferred_categories" in preferences:
-                category_score = self._calculate_category_score(
-                    event.get("categories", []),
-                    preferences["preferred_categories"]
-                )
-                score += weights["category"] * category_score
-                
-            # Price match
-            if "price_range" in preferences:
-                price_score = self._calculate_price_score(
-                    event.get("price_info", {}),
-                    preferences["price_range"]
-                )
-                score += weights["price"] * price_score
-                
-        # Popularity score
-        popularity_score = min(1.0, event.get("rsvp_count", 0) / 100)
-        score += weights["popularity"] * popularity_score
-        
-        return score
-        
-    def _calculate_category_score(
-        self,
-        event_categories: List[str],
-        preferred_categories: List[str]
-    ) -> float:
-        """Calculate how well event categories match user preferences."""
-        if not event_categories or not preferred_categories:
-            return 0.0
-            
-        matches = sum(1 for cat in event_categories if cat in preferred_categories)
-        return matches / max(len(event_categories), len(preferred_categories))
-        
-    def _calculate_price_score(
-        self,
-        price_info: Dict[str, Any],
-        preferred_range: Dict[str, float]
-    ) -> float:
-        """Calculate how well event price matches user preferences."""
-        if not price_info or "min_price" not in price_info:
-            return 0.5  # Neutral score for unknown price
-            
-        event_price = price_info["min_price"]
-        max_price = preferred_range.get("max", float("inf"))
-        
-        if event_price > max_price:
-            return 0.0
-            
-        # Score based on how close to preferred range
-        price_score = 1.0 - (event_price / max_price)
-        return max(0.0, min(1.0, price_score))
-
-    def _apply_preferences(
-        self,
-        events: List[EventModel],
-        preferences: Dict[str, Any]
+        categories: List[str],
+        location: Optional[Dict[str, Any]],
+        max_distance: float = 50,  # km
+        max_price: Optional[float] = None
     ) -> List[EventModel]:
-        """Apply user preferences to filter events."""
-        filtered = events.copy()
-        
-        # Filter by categories if specified
-        if 'categories' in preferences:
-            filtered = [
-                event for event in filtered
-                if any(cat in event.categories for cat in preferences['categories'])
-            ]
-        
-        # Filter by price range if specified
-        if 'max_price' in preferences:
-            filtered = [
-                event for event in filtered
-                if event.price_info and event.price_info.get('normalized_price', float('inf')) <= preferences['max_price']
-            ]
-        
-        # Filter by date range if specified
-        if 'date_range' in preferences:
-            start = preferences['date_range'].get('start')
-            end = preferences['date_range'].get('end')
-            
-            if start:
-                filtered = [
-                    event for event in filtered
-                    if event.start_datetime >= start
-                ]
-            
-            if end:
-                filtered = [
-                    event for event in filtered
-                    if event.start_datetime <= end
-                ]
-        
-        return filtered
-    
-    async def get_similar_events(
-        self,
-        event_id: str,
-        max_results: Optional[int] = None,
-        min_similarity: Optional[float] = None
-    ) -> List[EventModel]:
-        """
-        Get events similar to a given event.
-        
-        Args:
-            event_id: Reference event ID
-            max_results: Optional maximum number of results
-            min_similarity: Optional minimum similarity threshold
-            
-        Returns:
-            List of similar events
-        """
+        """Get candidate events based on basic criteria."""
         try:
-            # Get reference event
-            ref_event = self.db.query(EventModel).filter(
-                EventModel.id == event_id
-            ).first()
+            # Start with base query
+            query = select(EventModel).where(
+                EventModel.start_datetime >= datetime.utcnow()
+            )
             
-            if not ref_event:
-                raise ValueError(f"Event {event_id} not found")
-            
-            # Get candidate events (same city, upcoming)
-            candidates = self.db.query(EventModel).filter(
-                EventModel.venue_city == ref_event.venue_city,
-                EventModel.start_datetime >= datetime.utcnow(),
-                EventModel.id != event_id
-            ).all()
-            
-            # Calculate similarities
-            similar_events = []
-            min_sim = min_similarity or self.default_min_similarity
-            
-            for event in candidates:
-                # Compare titles
-                title_sim = calculate_title_similarity(ref_event.title, event.title)
+            # Filter by location if provided
+            if location:
+                lat = float(location.get("latitude", 0))
+                lon = float(location.get("longitude", 0))
                 
-                # Compare categories
-                cat_sim = len(set(ref_event.categories) & set(event.categories)) / \
-                    len(set(ref_event.categories) | set(event.categories)) if event.categories else 0
+                # Add location-based filtering
+                query = query.where(
+                    and_(
+                        # Allow events with null coordinates or within distance
+                        or_(
+                            and_(
+                                EventModel.venue_lat.isnot(None),
+                                EventModel.venue_lon.isnot(None),
+                                # Use Haversine formula to calculate distance
+                                func.acos(
+                                    func.sin(func.radians(lat)) * func.sin(func.radians(EventModel.venue_lat)) +
+                                    func.cos(func.radians(lat)) * func.cos(func.radians(EventModel.venue_lat)) *
+                                    func.cos(func.radians(EventModel.venue_lon) - func.radians(lon))
+                                ) * 6371 <= max_distance  # 6371 is Earth's radius in km
+                            ),
+                            and_(
+                                EventModel.venue_lat.is_(None),
+                                EventModel.venue_lon.is_(None)
+                            )
+                        )
+                    )
+                )
                 
-                # Calculate overall similarity
-                similarity = 0.7 * title_sim + 0.3 * cat_sim
+            # Filter by categories if provided
+            if categories:
+                query = query.where(
+                    EventModel.categories.overlap(categories)
+                )
                 
-                if similarity >= min_sim:
-                    similar_events.append((event, similarity))
+            # Filter by price if provided
+            if max_price is not None:
+                query = query.where(
+                    or_(
+                        EventModel.price.is_(None),
+                        EventModel.price <= max_price
+                    )
+                )
+                
+            # Execute query
+            result = await self.db.execute(query)
+            events = result.scalars().all()
             
-            # Sort by similarity and return top N
-            similar_events.sort(key=lambda x: x[1], reverse=True)
-            max_res = max_results or self.default_max_results
-            return [event for event, _ in similar_events[:max_res]]
+            return events
             
         except Exception as e:
-            logger.error(f"Error getting similar events: {str(e)}")
-            raise
+            logger.error(f"Error getting candidate events: {str(e)}")
+            return []
+            
+    async def _score_event(self, event: EventModel, preferences: Union[UserPreferencesBase, Dict[str, Any]]) -> float:
+        """Calculate a score for an event based on user preferences."""
+        try:
+            # Calculate individual scores
+            location_score = await self._calculate_location_score(event, preferences)
+            category_score = self._calculate_category_score(event, preferences)
+            price_score = self._calculate_price_score(event, preferences)
+            time_score = self._calculate_time_score(event, preferences)
+            
+            # Combine scores with weights
+            weights = {
+                'location': 0.4,  # Location is most important
+                'category': 0.3,  # Categories are next
+                'price': 0.2,    # Price is moderately important
+                'time': 0.1      # Time is least important
+            }
+            
+            total_score = (
+                weights['location'] * location_score +
+                weights['category'] * category_score +
+                weights['price'] * price_score +
+                weights['time'] * time_score
+            )
+            
+            return total_score
+            
+        except Exception as e:
+            logger.error(f"Error scoring event {event.id}: {str(e)}")
+            return 0.0
+            
+    def _calculate_category_score(self, event: EventModel, preferences: Union[UserPreferencesBase, Dict[str, Any]]) -> float:
+        """Calculate category preference score."""
+        try:
+            if isinstance(preferences, dict):
+                preferred_categories = preferences.get("preferred_categories", [])
+                excluded_categories = preferences.get("excluded_categories", [])
+            else:
+                preferred_categories = preferences.preferred_categories or []
+                excluded_categories = preferences.excluded_categories or []
+            
+            # If no categories specified, return neutral score
+            if not preferred_categories:
+                return 0.5
+            
+            # If event has any excluded categories, return 0
+            if any(cat in excluded_categories for cat in event.categories):
+                return 0.0
+            
+            # Calculate match percentage with preferred categories
+            matches = sum(1 for cat in event.categories if cat in preferred_categories)
+            if not matches:
+                return 0.1  # Small non-zero score for events with no matching categories
+            
+            return min(1.0, matches / len(preferred_categories))
+            
+        except Exception as e:
+            logger.error(f"Error calculating category score: {str(e)}")
+            return 0.0
+            
+    def _calculate_price_score(self, event: EventModel, preferences: Union[UserPreferencesBase, Dict[str, Any]]) -> float:
+        """Calculate price preference score."""
+        try:
+            if isinstance(preferences, dict):
+                max_price = preferences.get("max_price")
+                if max_price is None:
+                    return 1.0
+            else:
+                max_price = preferences.max_price
+                if max_price is None:
+                    return 1.0
+            
+            # If event is free, return perfect score
+            if not event.price_info or event.price_info == "null" or event.price_info == []:
+                return 1.0
+            
+            # Extract price from event
+            try:
+                if isinstance(event.price_info, str):
+                    price_info = json.loads(event.price_info)
+                else:
+                    price_info = event.price_info
+                
+                if isinstance(price_info, list):
+                    if not price_info:
+                        return 1.0
+                    # Use minimum price from list
+                    price = min(float(p.get("amount", 0)) for p in price_info)
+                else:
+                    price = float(price_info.get("amount", 0))
+            except (ValueError, AttributeError, json.JSONDecodeError):
+                return 1.0
+            
+            # Score based on price relative to max price
+            if price <= 0:
+                return 1.0
+            elif price >= max_price:
+                return 0.0
+            else:
+                return 1.0 - (price / max_price)
+            
+        except Exception as e:
+            logger.error(f"Error calculating price score: {str(e)}")
+            return 0.0
+            
+    def _calculate_time_score(self, event: EventModel, preferences: Union[UserPreferencesBase, Dict[str, Any]]) -> float:
+        """Calculate time preference score."""
+        try:
+            if isinstance(preferences, dict):
+                preferred_days = preferences.get("preferred_days", [])
+                preferred_times = preferences.get("preferred_times", [])
+            else:
+                preferred_days = preferences.preferred_days or []
+                preferred_times = preferences.preferred_times or []
+            
+            # If no time preferences, return neutral score
+            if not (preferred_days or preferred_times):
+                return 0.5
+            
+            scores = []
+            
+            # Score day match
+            if preferred_days:
+                event_day = event.start_datetime.strftime("%A").lower()
+                day_match = event_day in [day.lower() for day in preferred_days]
+                scores.append(1.0 if day_match else 0.0)
+            
+            # Score time match
+            if preferred_times:
+                event_hour = event.start_datetime.hour
+                time_ranges = {
+                    "morning": (5, 12),
+                    "afternoon": (12, 17),
+                    "evening": (17, 22),
+                    "night": (22, 5)
+                }
+                
+                # Check if event time falls within any preferred time range
+                time_match = any(
+                    start <= event_hour < end if start < end else
+                    (event_hour >= start or event_hour < end)
+                    for time_range in preferred_times
+                    for start, end in [time_ranges[time_range.lower()]]
+                    if time_range.lower() in time_ranges
+                )
+                scores.append(1.0 if time_match else 0.0)
+            
+            # Average all scores
+            return sum(scores) / len(scores) if scores else 0.5
+            
+        except Exception as e:
+            logger.error(f"Error calculating time score: {str(e)}")
+            return 0.0
+            
+    async def _calculate_location_score(
+        self,
+        event: EventModel,
+        preferences: Union[UserPreferencesBase, Dict[str, Any]]
+    ) -> float:
+        """Calculate location preference score."""
+        try:
+            if isinstance(preferences, dict):
+                if not preferences.get("preferred_location"):
+                    return 1.0
+                user_lat = float(preferences["preferred_location"].get("latitude", 0))
+                user_lon = float(preferences["preferred_location"].get("longitude", 0))
+                max_distance = preferences.get("max_distance", self.default_max_distance)
+            else:
+                if not preferences.preferred_location:
+                    return 1.0
+                user_lat = float(preferences.preferred_location.latitude or 0)
+                user_lon = float(preferences.preferred_location.longitude or 0)
+                max_distance = preferences.max_distance or self.default_max_distance
+            
+            if not (event.venue_lat and event.venue_lon):
+                return 0.0
+            
+            # Calculate distance
+            distance = self._calculate_distance(
+                user_lat,
+                user_lon,
+                event.venue_lat,
+                event.venue_lon
+            )
+            
+            # Score based on distance
+            return max(0.0, 1.0 - (distance / max_distance))
+            
+        except Exception as e:
+            logger.error(f"Error calculating location score: {str(e)}")
+            return 0.0
     
     def _calculate_distance(
         self,
@@ -290,4 +368,80 @@ class RecommendationEngine:
         a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
         c = 2 * atan2(sqrt(a), sqrt(1-a))
         
-        return R * c 
+        return R * c
+    
+    async def score_events_batch(
+        self,
+        events: List[EventModel],
+        preferences: UserPreferencesBase
+    ) -> List[Dict[str, Any]]:
+        """
+        Score a batch of events based on user preferences.
+        
+        Args:
+            events: List of events to score
+            preferences: User preferences
+            
+        Returns:
+            List of scored events with metadata
+        """
+        try:
+            scored_events = []
+            
+            for event in events:
+                # Calculate category match score (30%)
+                category_score = 0.0
+                if preferences.preferred_categories:
+                    matching_categories = len(
+                        set(event.categories) & set(preferences.preferred_categories)
+                    )
+                    category_score = matching_categories / max(len(event.categories), 1)
+                
+                # Calculate price score (20%)
+                price_score = 1.0  # Default to best score for free events
+                if event.price_info and preferences.max_price:
+                    event_price = float(event.price_info.get("max", 0))
+                    if event_price > preferences.max_price:
+                        price_score = max(0.0, 1.0 - (event_price - preferences.max_price) / preferences.max_price)
+                
+                # Calculate location score (30%)
+                location_score = 1.0  # Default to best score if no location preference
+                if preferences.preferred_location and event.venue_lat and event.venue_lon:
+                    distance = self._calculate_distance(
+                        preferences.preferred_location.latitude,
+                        preferences.preferred_location.longitude,
+                        event.venue_lat,
+                        event.venue_lon
+                    )
+                    max_distance = preferences.max_distance or self.default_max_distance
+                    location_score = max(0.0, 1.0 - (distance / max_distance))
+                
+                # Calculate time score (20%)
+                time_score = await self._calculate_time_score(event, {})
+                
+                # Calculate final score
+                final_score = (
+                    0.3 * category_score +
+                    0.2 * price_score +
+                    0.3 * location_score +
+                    0.2 * time_score
+                )
+                
+                scored_events.append({
+                    "event": event,
+                    "score": final_score,
+                    "metadata": {
+                        "category_score": category_score,
+                        "price_score": price_score,
+                        "location_score": location_score,
+                        "time_score": time_score
+                    }
+                })
+            
+            # Sort by score
+            scored_events.sort(key=lambda x: x["score"], reverse=True)
+            return scored_events
+            
+        except Exception as e:
+            logger.error(f"Error scoring events batch: {str(e)}")
+            return [] 
