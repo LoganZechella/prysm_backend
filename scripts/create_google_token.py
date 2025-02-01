@@ -23,7 +23,10 @@ SCOPES = [
     'https://www.googleapis.com/auth/contacts.readonly',
     'https://www.googleapis.com/auth/user.organization.read',
     'https://www.googleapis.com/auth/user.emails.read',
-    'https://www.googleapis.com/auth/user.addresses.read'
+    'https://www.googleapis.com/auth/user.addresses.read',
+    'https://www.googleapis.com/auth/user.birthday.read',
+    'https://www.googleapis.com/auth/user.gender.read',
+    'https://www.googleapis.com/auth/user.phonenumbers.read'
 ]
 
 def create_token(db: Session, user_id: str):
@@ -82,23 +85,37 @@ def create_token(db: Session, user_id: str):
         logger.error("Failed to obtain valid credentials")
         raise Exception("Failed to obtain valid credentials")
 
-    # Create token in database
-    token = OAuthToken(
+    # Check if token already exists
+    existing_token = db.query(OAuthToken).filter_by(
         user_id=user_id,
-        provider="google",
-        client_id=settings.GOOGLE_CLIENT_ID,
-        client_secret=settings.GOOGLE_CLIENT_SECRET,
-        redirect_uri="http://localhost:8001/",  # Use the actual redirect URI used in the flow
-        access_token=creds.token,
-        refresh_token=creds.refresh_token,
-        token_type="Bearer",
-        scope=" ".join(SCOPES),
-        expires_at=datetime.utcnow() + timedelta(seconds=creds.expiry.timestamp() - datetime.utcnow().timestamp()),
-        provider_metadata={}
-    )
+        provider="google"
+    ).first()
+
+    if existing_token:
+        # Update existing token
+        existing_token.access_token = creds.token
+        existing_token.refresh_token = creds.refresh_token
+        existing_token.expires_at = datetime.utcnow() + timedelta(seconds=creds.expiry.timestamp() - datetime.utcnow().timestamp())
+        existing_token.scope = " ".join(SCOPES)
+        token = existing_token
+    else:
+        # Create new token
+        token = OAuthToken(
+            user_id=user_id,
+            provider="google",
+            client_id=settings.GOOGLE_CLIENT_ID,
+            client_secret=settings.GOOGLE_CLIENT_SECRET,
+            redirect_uri="http://localhost:8001/",
+            access_token=creds.token,
+            refresh_token=creds.refresh_token,
+            token_type="Bearer",
+            scope=" ".join(SCOPES),
+            expires_at=datetime.utcnow() + timedelta(seconds=creds.expiry.timestamp() - datetime.utcnow().timestamp()),
+            provider_metadata={}
+        )
+        db.add(token)
 
     # Save to database
-    db.add(token)
     db.commit()
     db.refresh(token)
 

@@ -63,7 +63,9 @@ class GooglePeopleService:
                 logger.error(f"Could not get Google client for user {user_id}")
                 return {}
                 
-            return await self._extract_professional_traits(client)
+            traits = await self._extract_professional_traits(client)
+            await self._store_profile_data(user_id, traits)
+            return traits
             
         except Exception as e:
             logger.error(f"Error getting professional traits: {str(e)}")
@@ -75,7 +77,7 @@ class GooglePeopleService:
             # Get profile data with valid fields
             profile = client.people().get(
                 resourceName='people/me',
-                personFields='names,emailAddresses,organizations,occupations,locations,interests,skills,urls'
+                personFields='names,emailAddresses,organizations,occupations,locations,interests,skills,urls,birthdays,addresses,phoneNumbers,coverPhotos,genders,biographies,nicknames,photos'
             ).execute()
             
             # Extract relevant information
@@ -121,6 +123,30 @@ class GooglePeopleService:
             if 'occupations' in profile:
                 traits["occupations"] = [occ.get('value') for occ in profile['occupations']]
             
+            # Extract birthdays
+            traits["birthdays"] = profile.get('birthdays', [])
+
+            # Extract addresses
+            traits["addresses"] = profile.get('addresses', [])
+
+            # Extract phone numbers
+            traits["phoneNumbers"] = profile.get('phoneNumbers', [])
+
+            # Extract cover photos
+            traits["coverPhotos"] = profile.get('coverPhotos', [])
+
+            # Extract genders
+            traits["genders"] = profile.get('genders', [])
+
+            # Extract biographies
+            traits["biographies"] = profile.get('biographies', [])
+
+            # Extract nicknames
+            traits["nicknames"] = profile.get('nicknames', [])
+
+            # Extract photos
+            traits["photos"] = profile.get('photos', [])
+            
             return traits
             
         except Exception as e:
@@ -154,3 +180,49 @@ class GooglePeopleService:
         except Exception as e:
             logger.error(f"Error getting valid token: {str(e)}")
             return None 
+
+    async def _store_profile_data(self, user_id: str, profile_data: Dict[str, Any]) -> None:
+        """Store Google profile data in the database with merging and version history."""
+        try:
+            from sqlalchemy import select
+            from app.models.google_profile import GoogleProfile
+            from datetime import datetime
+
+            result = await self.db.execute(select(GoogleProfile).filter_by(user_id=user_id))
+            existing_profile = result.scalar_one_or_none()
+
+            current_ts = datetime.utcnow().isoformat()
+
+            def merge_data(existing: dict, new: dict) -> dict:
+                merged = {} if not existing else existing.copy()
+
+                for field, new_value in new.items():
+                    if field in merged:
+                        old_entry = merged.get(field)
+                        if isinstance(old_entry, dict) and 'value' in old_entry:
+                            if old_entry['value'] != new_value:
+                                prev_key = f'previous_{field}'
+                                if prev_key not in merged:
+                                    merged[prev_key] = []
+                                merged[prev_key].append(old_entry)
+                                merged[field] = {"value": new_value, "updated_at": current_ts}
+                            # else, value is the same, do nothing
+                        else:
+                            merged[field] = {"value": new_value, "updated_at": current_ts}
+                    else:
+                        merged[field] = {"value": new_value, "updated_at": current_ts}
+                return merged
+
+            if existing_profile:
+                updated_profile = merge_data(existing_profile.profile_data or {}, profile_data)
+                existing_profile.profile_data = updated_profile
+            else:
+                new_profile_struct = {}
+                for field, value in profile_data.items():
+                    new_profile_struct[field] = {"value": value, "updated_at": current_ts}
+                new_profile = GoogleProfile(user_id=user_id, profile_data=new_profile_struct)
+                self.db.add(new_profile)
+
+            await self.db.commit()
+        except Exception as e:
+            logger.error(f"Error storing google profile data for user {user_id}: {str(e)}") 

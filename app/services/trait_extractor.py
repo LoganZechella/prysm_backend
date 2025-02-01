@@ -4,6 +4,9 @@ from typing import Dict, List, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import uuid
+import asyncio
+from functools import partial
+import pytz
 
 from app.models.traits import Traits
 from app.services.spotify import SpotifyService
@@ -32,6 +35,11 @@ class TraitExtractor:
         self.linkedin_service = linkedin_service
         self.cache = CacheManager()
 
+    async def _run_sync(self, func, *args, **kwargs):
+        """Run a synchronous function in an async context."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+
     async def update_user_traits(self, user_id: str) -> Optional[Traits]:
         """Update traits for a user from all available sources."""
         try:
@@ -44,11 +52,12 @@ class TraitExtractor:
                 traits = Traits(
                     id=uuid.uuid4(),
                     user_id=user_id,
-                    last_updated_at=datetime.utcnow(),
-                    next_update_at=datetime.utcnow() + timedelta(days=7),
+                    last_updated_at=datetime.now(pytz.UTC),
+                    next_update_at=datetime.now(pytz.UTC) + timedelta(days=7),
                     professional_traits={}
                 )
                 self.db.add(traits)
+                await self.db.flush()
             
             # Initialize professional traits if not exists
             if not traits.professional_traits:
@@ -75,13 +84,9 @@ class TraitExtractor:
             if self.google_service:
                 google_traits = await self.google_service.get_professional_traits(user_id)
                 if google_traits:
-                    # Store Google traits in their own section
-                    traits.professional_traits["google"] = {
-                        "skills": google_traits.get("skills", []),
-                        "interests": google_traits.get("interests", []),
-                        "education": google_traits.get("education", [])
-                    }
-                    
+                    # Store full Google traits in their own section for better profiling
+                    traits.professional_traits["google"] = google_traits
+            
             # Extract LinkedIn professional traits
             if self.linkedin_service:
                 linkedin_traits = await self.linkedin_service.get_professional_traits(user_id)
@@ -93,8 +98,8 @@ class TraitExtractor:
                         "experience_years": linkedin_traits.get("experience_years")
                     }
             
-            traits.last_updated_at = datetime.utcnow()
-            traits.next_update_at = datetime.utcnow() + timedelta(days=7)
+            traits.last_updated_at = datetime.now(pytz.UTC)
+            traits.next_update_at = datetime.now(pytz.UTC) + timedelta(days=7)
             
             await self.db.commit()
             logger.info(f"Successfully updated traits for user {user_id}")
