@@ -1,0 +1,4 @@
+USER_ID,GENDER,AGE_GROUP,INTERESTS,PROFESSIONAL_FIELD,BEHAVIOR_PATTERNS
+test_user,Unknown,Unknown,"{""music"": [], ""professional"": [], ""general"": []}","{""industries"": [], ""job_titles"": [], ""skills"": [], ""experience_years"": null}","{""listening_patterns"": {}, ""discovery_ratio"": 0.0, ""engagement_level"": 0.0, ""social_score"": 0.0}"
+logan,Unknown,Unknown,"{""music"": [], ""professional"": [], ""general"": []}",{},"{""listening_patterns"": {}, ""discovery_ratio"": 0.0, ""engagement_level"": 0.0, ""social_score"": 0.0}"
+loganzechella,Unknown,Unknown,"{""music"": [], ""professional"": [], ""general"": []}","{""industries"": [], ""job_titles"": [], ""skills"": [], ""experience_years"": null}","{""listening_patterns"": {}, ""discovery_ratio"": 0.0, ""engagement_level"": 0.0, ""social_score"": 0.0}"

@@ -24,6 +24,7 @@ class UserFeedback(Base):
     feedback_context: Mapped[dict] = mapped_column(JSON, nullable=True)  # Additional feedback context
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False)  # Flag for synthetic data
     
     # Relationships
     event = relationship("EventModel", back_populates="feedback")
@@ -62,6 +63,7 @@ class ImplicitFeedback(Base):
     feedback_context: Mapped[dict] = mapped_column(JSON, nullable=True)  # Additional feedback context
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False)  # Flag for synthetic data
     
     # Relationships
     event = relationship("EventModel", back_populates="implicit_feedback")

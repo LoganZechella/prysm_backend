@@ -2,29 +2,191 @@
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 import logging
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.event import EventModel
 from app.models.preferences import UserPreferences, UserPreferencesBase, LocationPreference
 from app.services.recommendation_engine import RecommendationEngine
+from app.services.personalize_service import PersonalizeService
+from app.services.interaction_tracking import InteractionTrackingService
 from app.services.location_recommendations import LocationService
 from app.services.price_normalization import PriceNormalizer
 from app.services.category_extraction import CategoryExtractor
 from app.services.cache_service import CacheService
 from app.services.event_service import EventService
 from app.utils.pagination import PaginationParams
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 class RecommendationService:
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         """Initialize recommendation service with required components."""
         self.db = db
+        # Keep the custom engine for fallback
         self.recommendation_engine = RecommendationEngine(db=db)
+        # Add Personalize service
+        self.personalize_service = PersonalizeService(db=db)
+        # Add interaction tracking
+        self.interaction_service = InteractionTrackingService(db=db)
+        
         self.location_service = LocationService()
         self.price_normalizer = PriceNormalizer()
         self.category_extractor = CategoryExtractor()
         self.cache_service = CacheService()
         self.event_service = EventService()
+        
+    async def get_recommendations(
+        self,
+        user_id: str,
+        preferences: Optional[Dict[str, Any]] = None,
+        num_results: int = 25,
+        use_personalize: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Get recommendations for a user, using Amazon Personalize if available,
+        falling back to custom engine if needed.
+        """
+        try:
+            if use_personalize and settings.AWS_PERSONALIZE_CAMPAIGN_ARN:
+                # Get recommendations from Personalize
+                event_ids = await self.personalize_service.get_recommendations(
+                    user_id=user_id,
+                    num_results=num_results
+                )
+                
+                if event_ids:
+                    # Convert event IDs to full event data
+                    events = []
+                    for event_id in event_ids:
+                        event = await self.event_service.get_event(int(event_id))
+                        if event:
+                            events.append(event.to_dict())
+                    
+                    # Apply any additional filters from preferences
+                    filtered_events = await self._apply_preference_filters(
+                        events=events,
+                        preferences=preferences
+                    )
+                    
+                    return filtered_events
+                
+            # Fall back to custom engine if Personalize fails or is not configured
+            logger.info("Falling back to custom recommendation engine")
+            return await self.recommendation_engine.get_recommendations(
+                user_id=user_id,
+                preferences=preferences,
+                max_results=num_results
+            )
+            
+        except Exception as e:
+            logger.error(f"Error getting recommendations: {str(e)}")
+            # Fall back to custom engine on error
+            return await self.recommendation_engine.get_recommendations(
+                user_id=user_id,
+                preferences=preferences,
+                max_results=num_results
+            )
+    
+    async def track_interaction(
+        self,
+        user_id: str,
+        event_id: int,
+        interaction_type: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Track user interaction with an event."""
+        try:
+            # Track in local database
+            if interaction_type == 'view':
+                await self.interaction_service.track_view(
+                    user_id=user_id,
+                    event_id=event_id,
+                    context=context
+                )
+            elif interaction_type == 'click':
+                await self.interaction_service.track_click(
+                    user_id=user_id,
+                    event_id=event_id,
+                    context=context
+                )
+            elif interaction_type == 'rsvp':
+                rsvp_status = context.get('rsvp_status', True) if context else True
+                await self.interaction_service.track_rsvp(
+                    user_id=user_id,
+                    event_id=event_id,
+                    rsvp_status=rsvp_status,
+                    context=context
+                )
+            
+            # Record in Personalize if available
+            if settings.AWS_PERSONALIZE_TRACKING_ID:
+                event_type = settings.PERSONALIZE_EVENT_TYPES.get(interaction_type)
+                if event_type:
+                    await self.personalize_service.record_event(
+                        user_id=user_id,
+                        event_id=event_id,
+                        event_type=event_type,
+                        event_value=1.0 if interaction_type == 'rsvp' else None
+                    )
+            
+        except Exception as e:
+            logger.error(f"Error tracking interaction: {str(e)}")
+    
+    async def _apply_preference_filters(
+        self,
+        events: List[Dict[str, Any]],
+        preferences: Optional[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Apply user preferences as filters to recommended events."""
+        if not preferences:
+            return events
+            
+        filtered_events = []
+        for event in events:
+            # Apply category filter
+            if preferred_categories := preferences.get('preferred_categories'):
+                if not any(cat in event['categories'] for cat in preferred_categories):
+                    continue
+                    
+            # Apply price filter
+            if max_price := preferences.get('max_price'):
+                event_price = event.get('price_info', {}).get('min_price', 0)
+                if event_price and event_price > max_price:
+                    continue
+                    
+            # Apply location filter
+            if location := preferences.get('preferred_location'):
+                if not self._is_within_distance(
+                    event=event,
+                    user_lat=location.get('latitude'),
+                    user_lon=location.get('longitude'),
+                    max_distance=preferences.get('max_distance', 50)
+                ):
+                    continue
+                    
+            filtered_events.append(event)
+            
+        return filtered_events
+    
+    def _is_within_distance(
+        self,
+        event: Dict[str, Any],
+        user_lat: float,
+        user_lon: float,
+        max_distance: float
+    ) -> bool:
+        """Check if event is within max distance of user location."""
+        if not all([user_lat, user_lon, event.get('venue_latitude'), event.get('venue_longitude')]):
+            return True  # Include events with no location data
+            
+        distance = self.location_service.calculate_distance(
+            lat1=user_lat,
+            lon1=user_lon,
+            lat2=event['venue_latitude'],
+            lon2=event['venue_longitude']
+        )
+        
+        return distance <= max_distance
 
     async def get_personalized_recommendations(
         self,

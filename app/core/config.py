@@ -1,7 +1,11 @@
 """Application configuration."""
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Union
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator
+from pydantic import field_validator, AnyHttpUrl, PostgresDsn
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def clean_int_value(v: Any) -> int:
     """Clean integer values from environment variables."""
@@ -117,7 +121,12 @@ class Settings(BaseSettings):
     AWS_ACCESS_KEY_ID: Optional[str] = None
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
     AWS_DEFAULT_REGION: str = "global"
-    S3_BUCKET_PREFIX: Optional[str] = None
+    S3_BUCKET_PREFIX: str = "prysm-events"
+    AWS_PERSONALIZE_ROLE_ARN: Optional[str] = None  # IAM role ARN for Personalize
+    AWS_PERSONALIZE_DATASET_GROUP_ARN: Optional[str] = None
+    AWS_PERSONALIZE_CAMPAIGN_ARN: Optional[str] = None
+    AWS_PERSONALIZE_TRACKING_ID: Optional[str] = None
+    AWS_PERSONALIZE_SOLUTION_VERSION_ARN: Optional[str] = None
     DYNAMODB_EVENTS_TABLE: Optional[str] = None
     DYNAMODB_RAW_EVENTS_TABLE: Optional[str] = None
     
@@ -137,6 +146,18 @@ class Settings(BaseSettings):
     SUPERTOKENS_WEBSITE_BASE_PATH: Optional[str] = None
     WEBSITE_DOMAIN: Optional[str] = None
     API_DOMAIN: Optional[str] = None
+    
+    # Event Types for Personalize
+    PERSONALIZE_EVENT_TYPES: Dict[str, str] = {
+        'view': 'VIEW',
+        'click': 'CLICK',
+        'rsvp': 'RSVP',
+        'like': 'LIKE',
+        'share': 'SHARE'
+    }
+
+    # AWS Personalize Settings
+    AWS_PERSONALIZE_RECOMMENDER_ARN: Optional[str] = None
 
     model_config = SettingsConfigDict(
         case_sensitive=True,

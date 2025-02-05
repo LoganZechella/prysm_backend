@@ -29,6 +29,9 @@ env/
 ENV/
 .env
 .venv
+.env.local
+.cursorignore  
+
 nlp_service_account_key.json
 Prysm_Backend_Architecture_Analysis_Jan16_Update.md
 integration-testing-plan.md
@@ -98,3 +101,91 @@ Thumbs.db
 
 # Local configuration overrides
 config/local.yaml 
+
+# Additional Python ignores
+*.pyc
+__pycache__
+.pytest_cache
+.coverage.*
+.python-version
+.env.*
+!.env.example
+
+# Additional AWS ignores
+.aws/
+aws.config
+aws.credentials
+*.pem
+*.ppk
+
+# Additional Development ignores
+.history/
+.vscode-test/
+*.code-workspace
+.idea_modules/
+*.iml
+.metals/
+.bloop/
+.ensime
+.ensime_cache/
+.scala_dependencies
+.worksheet
+
+# Additional Database ignores
+*.sqlite
+*.sqlite3
+*.db
+*.sql
+
+# Additional Cache and Temp files
+.tmp/
+.temp/
+.cache/
+*.bak
+*.swp
+*.swo
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# Additional Build ignores
+dist/
+build/
+out/
+target/
+*.class
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# Additional Documentation ignores
+docs/_build/
+site/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Additional Security ignores
+*.key
+*.pem
+*.crt
+*.csr
+*.der
+*.p12
+*.pfx
+*.p7b
+*.p7r
+*.spc
+*.sst
+*id_rsa*
+*id_dsa*
+*id_ecdsa*
+*id_ed25519* 

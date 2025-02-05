@@ -556,6 +556,16 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
                 venue_info = self._extract_venue_info(card, i)
                 event_data.update(venue_info)
                 
+                # Extract price information with enhanced logging
+                price_info = self._extract_price_info(card, i)
+                self.logger.debug(f"[facebook] Extracted price info: {price_info}")
+                event_data["price_info"] = price_info
+                
+                # Extract categories with enhanced logging
+                categories = self._extract_categories(card, title, i)
+                self.logger.debug(f"[facebook] Extracted categories: {categories}")
+                event_data["categories"] = categories
+                
                 # Extract image URL with multiple fallback methods
                 image_url = self._extract_image_url(card, i)
                 event_data["image_url"] = image_url
@@ -564,7 +574,7 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
                 rsvp_info = self._extract_rsvp_info(card, i)
                 event_data.update(rsvp_info)
                 
-                # Generate unique platform ID
+                # Generate platform ID before validation
                 platform_id = self._generate_platform_id(event_data)
                 event_data["platform_id"] = platform_id
                 
@@ -576,7 +586,7 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
                     "platform": "facebook",
                     "is_online": venue_info.get("is_online", False),
                     "description": "",  # Default empty description
-                    "categories": [],  # Default empty categories
+                    "name": title,  # Changed from title to name to match _process_event
                     "organizer_name": title.split(" - ")[0] if " - " in title else title,
                     "organizer_id": platform_id
                 })
@@ -748,13 +758,25 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
         """Generate a unique platform ID for the event."""
         try:
             # Create a unique string combining multiple event attributes
-            unique_string = f"{event_data['title']}{event_data['start_datetime']}{event_data['venue_name']}"
+            unique_string = (
+                f"{event_data.get('title', '')}"
+                f"{event_data.get('start_datetime', '')}"
+                f"{event_data.get('venue_name', '')}"
+                f"{event_data.get('venue_city', '')}"
+                f"{event_data.get('venue_state', '')}"
+            )
+            
             # Generate MD5 hash
-            return hashlib.md5(unique_string.encode()).hexdigest()
+            platform_id = hashlib.md5(unique_string.encode()).hexdigest()
+            self.logger.debug(f"[facebook] Generated platform ID: {platform_id} for event: {event_data.get('title', '')}")
+            return platform_id
+            
         except Exception as e:
             self.logger.error(f"[facebook] Error generating platform ID: {str(e)}")
             # Fallback to timestamp-based ID
-            return hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()
+            fallback_id = hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()
+            self.logger.debug(f"[facebook] Using fallback platform ID: {fallback_id}")
+            return fallback_id
     
     def _validate_event_data(self, event_data: Dict[str, Any], card_index: int) -> bool:
         """Validate required fields in event data."""
@@ -910,6 +932,17 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
             # Process venue information
             venue_info = await self._process_venue_info(event_data)
             
+            # Process price information
+            price_info = event_data.get('price_info', {
+                'currency': 'USD',
+                'min_price': 0.0,
+                'max_price': 0.0,
+                'price_tier': 'free'
+            })
+            
+            # Process categories
+            categories = event_data.get('categories', ['other'])
+            
             # Build processed event
             processed_event = {
                 'platform_id': event_id,
@@ -927,8 +960,8 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
                 'platform': 'facebook',
                 'is_online': event_data.get('is_online', False),
                 'rsvp_count': event_data.get('attending_count', 0),
-                'price_info': event_data.get('ticket_uri', None),
-                'categories': event_data.get('event_categories', []),
+                'price_info': price_info,
+                'categories': categories,
                 'image_url': event_data.get('cover', {}).get('source', None)
             }
             
@@ -936,4 +969,213 @@ class FacebookScrapflyScraper(ScrapflyBaseScraper):
             
         except Exception as e:
             self.logger.error(f"[facebook] Error processing event: {str(e)}")
-            return None 
+            return None
+
+    def _extract_price_info(self, card: BeautifulSoup, card_index: int) -> Dict[str, Any]:
+        """Extract price information from event card."""
+        try:
+            price_info = {
+                'currency': 'USD',  # Default currency
+                'min_price': 0.0,
+                'max_price': 0.0,
+                'price_tier': 'free'  # Default to free
+            }
+            
+            # Try multiple selectors for price information
+            price_selectors = [
+                ("span", {"class": "x193iq5w"}),
+                ("div", {"class": "x6prxxf"}),
+                ("span", {"class": "xt0psk2"}),
+                ("div", {"class": "x1e56ztr"}),
+                ("span", {"class": "x4k7w5x"})
+            ]
+            
+            # Price patterns to match
+            price_patterns = [
+                r'\$(\d+(?:\.\d{2})?)',  # Basic price: $XX.XX
+                r'(\d+)(?:\.\d{2})?\s*(?:dollars|usd)',  # Price with currency word
+                r'starting\s+(?:at\s+)?\$(\d+(?:\.\d{2})?)',  # Starting at price
+                r'from\s+\$(\d+(?:\.\d{2})?)',  # From price
+                r'tickets?\s+(?:from\s+)?\$(\d+(?:\.\d{2})?)',  # Ticket price
+                r'\$(\d+(?:\.\d{2})?)\s*-\s*\$(\d+(?:\.\d{2})?)',  # Price range
+                r'(\d+)(?:\.\d{2})?\s*-\s*(\d+)(?:\.\d{2})?\s*(?:dollars|usd)',  # Range with currency word
+            ]
+            
+            for selector in price_selectors:
+                elements = card.find_all(*selector)
+                for elem in elements:
+                    text = elem.get_text().strip().lower()
+                    
+                    # Skip if it's a date string or RSVP count
+                    if any(day in text for day in ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']):
+                        continue
+                    if any(word in text for word in ['going', 'interested']):
+                        continue
+                    
+                    # Check for free event indicators
+                    if any(word in text for word in ['free', 'no cost', 'complimentary']):
+                        self.logger.debug(f"[facebook] Found free event indicator in card {card_index}")
+                        return price_info
+                    
+                    # Try each price pattern
+                    for pattern in price_patterns:
+                        matches = re.search(pattern, text)
+                        if matches:
+                            groups = matches.groups()
+                            if len(groups) == 2:  # Price range
+                                try:
+                                    min_price = float(groups[0])
+                                    max_price = float(groups[1])
+                                    price_info.update({
+                                        'min_price': min_price,
+                                        'max_price': max_price,
+                                        'price_tier': self._determine_price_tier(min_price)
+                                    })
+                                    self.logger.debug(f"[facebook] Found price range ${min_price}-${max_price} in card {card_index}")
+                                    return price_info
+                                except (ValueError, TypeError):
+                                    continue
+                            elif len(groups) == 1:  # Single price
+                                try:
+                                    price = float(groups[0])
+                                    price_info.update({
+                                        'min_price': price,
+                                        'max_price': price,
+                                        'price_tier': self._determine_price_tier(price)
+                                    })
+                                    self.logger.debug(f"[facebook] Found single price ${price} in card {card_index}")
+                                    return price_info
+                                except (ValueError, TypeError):
+                                    continue
+            
+            # Check for ticket-related text without specific prices
+            ticket_indicators = ['ticket', 'admission', 'entry', 'passes', 'registration']
+            for selector in price_selectors:
+                elements = card.find_all(*selector)
+                for elem in elements:
+                    text = elem.get_text().strip().lower()
+                    if any(indicator in text for indicator in ticket_indicators):
+                        # If we find ticket-related text but no price, set a default paid tier
+                        price_info.update({
+                            'min_price': 25.0,  # Default minimum price
+                            'max_price': 25.0,
+                            'price_tier': 'medium'
+                        })
+                        self.logger.debug(f"[facebook] Found ticket indicator without price in card {card_index}, using default price")
+                        return price_info
+            
+            self.logger.debug(f"[facebook] No price information found in card {card_index}, using default free tier")
+            return price_info
+            
+        except Exception as e:
+            self.logger.error(f"[facebook] Error extracting price info from card {card_index}: {str(e)}")
+            return {
+                'currency': 'USD',
+                'min_price': 0.0,
+                'max_price': 0.0,
+                'price_tier': 'free'
+            }
+
+    def _determine_price_tier(self, price: float) -> str:
+        """Determine price tier based on minimum price."""
+        if price == 0:
+            return 'free'
+        elif price < 25:
+            return 'budget'
+        elif price < 50:
+            return 'medium'
+        elif price < 100:
+            return 'premium'
+        else:
+            return 'luxury'
+
+    def _extract_categories(self, card: BeautifulSoup, title: str, card_index: int) -> List[str]:
+        """Extract categories from event card and title."""
+        try:
+            categories = set()
+            
+            # Category mapping based on keywords
+            category_keywords = {
+                'music': [
+                    'concert', 'music', 'band', 'live', 'performance', 'festival', 'dj',
+                    'tour', 'gig', 'show', 'tickets', 'stage', 'venue', 'arena',
+                    'rock', 'jazz', 'blues', 'pop', 'hip hop', 'rap', 'metal',
+                    'acoustic', 'symphony', 'orchestra', 'choir', 'musical',
+                    'singer', 'songwriter', 'artist', 'performer'
+                ],
+                'comedy': ['comedy', 'standup', 'comedian', 'improv', 'humour', 'funny'],
+                'sports': [
+                    'sports', 'game', 'match', 'tournament', 'championship',
+                    'racing', 'derby', 'competition', 'athletics', 'league'
+                ],
+                'arts': [
+                    'art', 'exhibition', 'gallery', 'museum', 'theatre',
+                    'dance', 'ballet', 'opera', 'painting', 'sculpture'
+                ],
+                'food': [
+                    'food', 'dining', 'tasting', 'culinary', 'restaurant',
+                    'chef', 'cooking', 'cuisine', 'menu', 'feast'
+                ],
+                'business': [
+                    'business', 'networking', 'conference', 'seminar',
+                    'workshop', 'professional', 'industry', 'corporate'
+                ],
+                'education': [
+                    'education', 'workshop', 'training', 'class', 'lecture',
+                    'seminar', 'learning', 'course', 'study', 'academic'
+                ],
+                'technology': [
+                    'tech', 'technology', 'coding', 'developer', 'digital',
+                    'software', 'hardware', 'startup', 'innovation'
+                ],
+                'health': [
+                    'health', 'wellness', 'fitness', 'yoga', 'meditation',
+                    'exercise', 'workout', 'mindfulness', 'healing'
+                ],
+                'community': [
+                    'community', 'meetup', 'social', 'gathering', 'local',
+                    'neighborhood', 'group', 'club', 'society'
+                ],
+            }
+            
+            # Convert title to lowercase for matching
+            title_lower = title.lower()
+            
+            # Check title against category keywords
+            for category, keywords in category_keywords.items():
+                if any(keyword in title_lower for keyword in keywords):
+                    categories.add(category)
+            
+            # Try to extract additional categories from the card
+            text_elements = card.find_all(['span', 'div'], {'class': ['x193iq5w', 'x6prxxf', 'xt0psk2']})
+            for elem in text_elements:
+                text = elem.get_text().strip().lower()
+                for category, keywords in category_keywords.items():
+                    if any(keyword in text for keyword in keywords):
+                        categories.add(category)
+            
+            # Special handling for music events
+            if any(artist in title_lower for artist in [
+                'disturbed', 'kid rock', 'deftones', 'trentemoller', 'haunt',
+                'bill murray', 'gabriel iglesias', 'rauw alejandro', 'pouya',
+                'excision', 'shakira', 'vision video'
+            ]):
+                categories.add('music')
+            
+            # Special handling for sports events
+            if 'derby' in title_lower and 'churchill downs' in title_lower:
+                categories.add('sports')
+            
+            # Special handling for comedy events
+            if 'gabriel iglesias' in title_lower:
+                categories.add('comedy')
+            
+            # Ensure we have at least one category
+            if not categories:
+                categories.add('other')  # Default category
+            
+            return list(categories)
+            
+        except Exception as e:
+            self.logger.error(f"[facebook] Error extracting categories from card {card_index}: {str(e)}")
+            return ['other']  # Return default category on error 
