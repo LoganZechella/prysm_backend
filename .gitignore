@@ -188,4 +188,20 @@ dmypy.json
 *id_rsa*
 *id_dsa*
 *id_ecdsa*
-*id_ed25519* 
+*id_ed25519*
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+*.tfplan
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+.terraform.lock.hcl
+terraform-provider-* 
